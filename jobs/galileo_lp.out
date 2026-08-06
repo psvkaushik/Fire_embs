@@ -1,0 +1,53 @@
+[galileo_linear_probe] cached embeddings from embeddings/10m (7100 train / 1800 val / 1700 test)
+  galileo: embed_dim=768  grid_size=28
+[galileo_linear_probe] ready | trainable params: 769 (no frozen encoder -- it's not even loaded here)
+epoch 1/40 | train_loss=0.6336 | val_loss=0.6379 | val_f1(0.5)=0.0000 | val_f1(best_thr=0.10)=0.1122 | val_iou=0.0000
+epoch 2/40 | train_loss=0.6189 | val_loss=0.6393 | val_f1(0.5)=0.0000 | val_f1(best_thr=0.10)=0.0684 | val_iou=0.0000
+epoch 3/40 | train_loss=0.6180 | val_loss=0.6394 | val_f1(0.5)=0.0000 | val_f1(best_thr=0.10)=0.0690 | val_iou=0.0000
+epoch 4/40 | train_loss=0.6175 | val_loss=0.6389 | val_f1(0.5)=0.0000 | val_f1(best_thr=0.10)=0.0770 | val_iou=0.0000
+epoch 5/40 | train_loss=0.6181 | val_loss=0.6388 | val_f1(0.5)=0.0000 | val_f1(best_thr=0.10)=0.1415 | val_iou=0.0000
+epoch 6/40 | train_loss=0.6173 | val_loss=0.6401 | val_f1(0.5)=0.0000 | val_f1(best_thr=0.10)=0.0615 | val_iou=0.0000
+epoch 7/40 | train_loss=0.6166 | val_loss=0.6383 | val_f1(0.5)=0.0000 | val_f1(best_thr=0.10)=0.2096 | val_iou=0.0000
+epoch 8/40 | train_loss=0.6170 | val_loss=0.6401 | val_f1(0.5)=0.0000 | val_f1(best_thr=0.10)=0.0626 | val_iou=0.0000
+epoch 9/40 | train_loss=0.6167 | val_loss=0.6391 | val_f1(0.5)=0.0000 | val_f1(best_thr=0.10)=0.1867 | val_iou=0.0000
+epoch 10/40 | train_loss=0.6168 | val_loss=0.6387 | val_f1(0.5)=0.0000 | val_f1(best_thr=0.10)=0.1900 | val_iou=0.0000
+epoch 11/40 | train_loss=0.6161 | val_loss=0.6384 | val_f1(0.5)=0.0000 | val_f1(best_thr=0.10)=0.2015 | val_iou=0.0000
+epoch 12/40 | train_loss=0.6166 | val_loss=0.6378 | val_f1(0.5)=0.0000 | val_f1(best_thr=0.10)=0.2094 | val_iou=0.0000
+epoch 13/40 | train_loss=0.6161 | val_loss=0.6375 | val_f1(0.5)=0.0000 | val_f1(best_thr=0.10)=0.2100 | val_iou=0.0000
+epoch 14/40 | train_loss=0.6164 | val_loss=0.6382 | val_f1(0.5)=0.0001 | val_f1(best_thr=0.10)=0.2109 | val_iou=0.0000
+epoch 15/40 | train_loss=0.6159 | val_loss=0.6383 | val_f1(0.5)=0.0001 | val_f1(best_thr=0.10)=0.2115 | val_iou=0.0000
+epoch 16/40 | train_loss=0.6157 | val_loss=0.6380 | val_f1(0.5)=0.0001 | val_f1(best_thr=0.10)=0.2123 | val_iou=0.0000
+epoch 17/40 | train_loss=0.6152 | val_loss=0.6387 | val_f1(0.5)=0.0002 | val_f1(best_thr=0.10)=0.2132 | val_iou=0.0001
+epoch 18/40 | train_loss=0.6155 | val_loss=0.6369 | val_f1(0.5)=0.0002 | val_f1(best_thr=0.10)=0.2052 | val_iou=0.0001
+epoch 19/40 | train_loss=0.6156 | val_loss=0.6382 | val_f1(0.5)=0.0002 | val_f1(best_thr=0.10)=0.2156 | val_iou=0.0001
+epoch 20/40 | train_loss=0.6157 | val_loss=0.6390 | val_f1(0.5)=0.0004 | val_f1(best_thr=0.10)=0.2154 | val_iou=0.0002
+epoch 21/40 | train_loss=0.6153 | val_loss=0.6373 | val_f1(0.5)=0.0021 | val_f1(best_thr=0.10)=0.1977 | val_iou=0.0011
+epoch 22/40 | train_loss=0.6152 | val_loss=0.6386 | val_f1(0.5)=0.0003 | val_f1(best_thr=0.10)=0.2177 | val_iou=0.0001
+epoch 23/40 | train_loss=0.6155 | val_loss=0.6373 | val_f1(0.5)=0.0005 | val_f1(best_thr=0.10)=0.2170 | val_iou=0.0003
+epoch 24/40 | train_loss=0.6150 | val_loss=0.6366 | val_f1(0.5)=0.0010 | val_f1(best_thr=0.10)=0.2059 | val_iou=0.0005
+epoch 25/40 | train_loss=0.6150 | val_loss=0.6384 | val_f1(0.5)=0.0004 | val_f1(best_thr=0.10)=0.2223 | val_iou=0.0002
+epoch 26/40 | train_loss=0.6151 | val_loss=0.6372 | val_f1(0.5)=0.0011 | val_f1(best_thr=0.10)=0.2199 | val_iou=0.0005
+epoch 27/40 | train_loss=0.6149 | val_loss=0.6382 | val_f1(0.5)=0.0015 | val_f1(best_thr=0.10)=0.2261 | val_iou=0.0007
+epoch 28/40 | train_loss=0.6148 | val_loss=0.6395 | val_f1(0.5)=0.0012 | val_f1(best_thr=0.10)=0.2231 | val_iou=0.0006
+epoch 29/40 | train_loss=0.6148 | val_loss=0.6390 | val_f1(0.5)=0.0007 | val_f1(best_thr=0.10)=0.2235 | val_iou=0.0003
+epoch 30/40 | train_loss=0.6143 | val_loss=0.6381 | val_f1(0.5)=0.0008 | val_f1(best_thr=0.10)=0.2306 | val_iou=0.0004
+epoch 31/40 | train_loss=0.6145 | val_loss=0.6375 | val_f1(0.5)=0.0017 | val_f1(best_thr=0.10)=0.2296 | val_iou=0.0009
+epoch 32/40 | train_loss=0.6144 | val_loss=0.6390 | val_f1(0.5)=0.0010 | val_f1(best_thr=0.10)=0.2277 | val_iou=0.0005
+epoch 33/40 | train_loss=0.6142 | val_loss=0.6367 | val_f1(0.5)=0.0033 | val_f1(best_thr=0.10)=0.2156 | val_iou=0.0016
+epoch 34/40 | train_loss=0.6139 | val_loss=0.6367 | val_f1(0.5)=0.0036 | val_f1(best_thr=0.10)=0.2143 | val_iou=0.0018
+epoch 35/40 | train_loss=0.6138 | val_loss=0.6388 | val_f1(0.5)=0.0027 | val_f1(best_thr=0.10)=0.2388 | val_iou=0.0013
+epoch 36/40 | train_loss=0.6137 | val_loss=0.6385 | val_f1(0.5)=0.0023 | val_f1(best_thr=0.10)=0.2401 | val_iou=0.0011
+epoch 37/40 | train_loss=0.6140 | val_loss=0.6366 | val_f1(0.5)=0.0035 | val_f1(best_thr=0.10)=0.2231 | val_iou=0.0018
+epoch 38/40 | train_loss=0.6137 | val_loss=0.6377 | val_f1(0.5)=0.0022 | val_f1(best_thr=0.10)=0.2428 | val_iou=0.0011
+epoch 39/40 | train_loss=0.6138 | val_loss=0.6367 | val_f1(0.5)=0.0049 | val_f1(best_thr=0.10)=0.2124 | val_iou=0.0025
+epoch 40/40 | train_loss=0.6137 | val_loss=0.6372 | val_f1(0.5)=0.0031 | val_f1(best_thr=0.10)=0.2404 | val_iou=0.0016
+
+============================================================
+TEST RESULTS | galileo_linear_probe
+============================================================
+  loss:      0.8582
+  F1:        0.1217
+  mIoU:      0.0648
+  precision: 0.1876
+  recall:    0.0900
+  threshold: 0.10 (best on val)
