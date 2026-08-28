@@ -272,7 +272,89 @@ class SmartiesEncoder(_FrozenAwareModule):
         B = pre.shape[0]
         return torch.cat([grid[:B], grid[B:]], dim=1)
 
+# ============================================================
+# Clay v1.5 -- fully wired
+#
+# Dynamic wavelength-conditioned embedding block -- passes central
+# wavelength per band instead of fixed channel counts, so all 12
+# CaBuAr S2 bands work directly, no spectral adapter needed.
+# patch_size=8, embed_dim=1024 -- matches CROMA exactly, so token
+# grids align for early fusion with no interpolation.
+#
+# IMPORTANT: Clay's encoder is an MAE encoder -- by default it masks
+# 75% of patches and returns only the unmasked subset, which can't be
+# reshaped into a full spatial grid. mask_ratio/shuffle are NOT forward()
+# args -- they're set at LOAD time via load_from_checkpoint(), per
+# Clay's own tutorials (see clay-foundation.github.io/model/tutorials/
+# embeddings.html). mask_ratio=0.0 + shuffle=False gives back every
+# patch, in raster order, so no unmasked_indices bookkeeping is needed.
+#
+# Pre/post handled the same batch-concat way as CROMA/SMARTIES.
+# ============================================================
 
+_CLAY_S2_WAVELENGTHS = [
+    443, 490, 560, 665, 705, 740, 783, 842, 865, 945, 1610, 2190,
+]   # nanometres, CABUAR_BANDS order (B01..B12) -- see configs.CABUAR_BANDS
+
+
+class ClayEncoder(_FrozenAwareModule):
+    spec_name = "clay"
+
+    def __init__(self, resize_px: int, ckpt_path: str = "clay-v1.5.ckpt",
+                 metadata_path: str = "metadata.yaml"):
+        super().__init__()
+        spec = MODEL_SPECS["clay"]
+        from claymodel.module import ClayMAEModule
+        clay_module = ClayMAEModule.load_from_checkpoint(
+            checkpoint_path=ckpt_path,
+            model_size="large",
+            metadata_path=metadata_path,
+            dolls=[16, 32, 64, 128, 256, 768, 1024],
+            doll_weights=[1, 1, 1, 1, 1, 1, 1],
+            mask_ratio=0.0,     # disable masking -- segmentation needs every patch
+            shuffle=False,      # keep raster order -- no re-sorting via unmasked_indices
+            map_location="cpu",
+        )
+        clay_module.eval()
+        self.model = clay_module.model.encoder   # just the encoder, not the decoder
+
+        assert resize_px % spec.patch_size == 0, \
+            f"resize_px={resize_px} not divisible by Clay patch_size={spec.patch_size}"
+        self.patch_size = spec.patch_size
+        self.grid_size = resize_px // spec.patch_size
+        self.embed_dim = spec.embed_dim * 2   # pre+post concat, same convention as CROMA/SMARTIES
+
+        self.register_buffer(
+            "_wavelengths",
+            torch.tensor(_CLAY_S2_WAVELENGTHS, dtype=torch.float32)
+        )
+        self.frozen = False
+
+    def forward(self, pre: torch.Tensor, post: torch.Tensor) -> torch.Tensor:
+        stacked = torch.cat([pre, post], dim=0)   # (2B, 12, H, W)
+        B2 = stacked.shape[0]
+
+        waves = self._wavelengths.unsqueeze(0).expand(B2, -1).to(stacked.device)
+        timestamps = torch.zeros(B2, 4, device=stacked.device)   # [week, hour, lat, lon] -- zeros ok
+
+        tokens, unmsk_idx, msk_idx, msk_matrix = self.model(stacked, timestamps, waves)
+        # with mask_ratio=0.0 + shuffle=False, tokens should be the FULL grid
+        # in raster order -- unmsk_idx/msk_idx are ignorable here since
+        # nothing was actually masked.
+
+        B2_, N, C = tokens.shape
+        g = self.grid_size
+        if N == g * g + 1:
+            tokens = tokens[:, 1:, :]   # strip CLS token if the encoder still prepends one
+            B2_, N, C = tokens.shape
+        assert N == g * g, \
+            f"Clay: expected {g*g} tokens, got {N} -- check mask_ratio/shuffle took effect " \
+            f"and resize_px={g*self.patch_size} is what was actually passed in"
+
+        grid = tokens.reshape(B2_, g, g, C).permute(0, 3, 1, 2)
+        B = pre.shape[0]
+        return torch.cat([grid[:B], grid[B:]], dim=1)   # (B, 2048, g, g)
+        
 # ============================================================
 # STUBS -- interface finalized, weight-loading left as TODO
 # ============================================================
@@ -452,17 +534,23 @@ ENCODER_CLASSES = {
     "smarties": SmartiesEncoder,
     "galileo": GalileoEncoder,
     "satmae": SatMAEEncoder,
+    "clay": ClayEncoder,
 }
 
 
-def build_encoder(model_name: str, resize_px: int, device: str, croma_ckpt: str = "/mnt/beegfs/spillal2/caburn/Emb_For_Fire/CROMA_large.pt",
-                   galileo_checkpoint_folder: str = None) -> nn.Module:
+def build_encoder(model_name: str, resize_px: int, device: str,
+                   croma_ckpt: str = "/mnt/beegfs/spillal2/caburn/Emb_For_Fire/CROMA_large.pt",
+                   galileo_checkpoint_folder: str = None,
+                   clay_ckpt: str = "clay-v1.5.ckpt",
+                   clay_metadata: str = "metadata.yaml") -> nn.Module:
     cls = ENCODER_CLASSES[model_name]
     if model_name == "croma":
         enc = cls(resize_px, ckpt_path=croma_ckpt)
     elif model_name == "galileo":
         kwargs = {"checkpoint_folder": galileo_checkpoint_folder} if galileo_checkpoint_folder else {}
         enc = cls(resize_px, **kwargs)
+    elif model_name == "clay":
+        enc = cls(resize_px, ckpt_path=clay_ckpt, metadata_path=clay_metadata)
     else:
         enc = cls(resize_px)
     return enc.to(device)
