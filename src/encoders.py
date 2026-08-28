@@ -417,7 +417,7 @@ class GalileoEncoder(_FrozenAwareModule):
         s_t_x[..., 1, _GALILEO_S2_BAND_START:_GALILEO_S2_BAND_START + C] = post.permute(0, 2, 3, 1)
 
         s_t_m = torch.ones(B, H, W, T, 7, device=device, dtype=dtype)   # 7 space-time channel groups; 1 = masked
-        s_t_m[..., _GALILEO_S2_GROUP_SLICE] = 2                        # unmask (make visible) the 5 S2 groups
+        s_t_m[..., _GALILEO_S2_GROUP_SLICE] = 0                       # unmask (make visible) the 5 S2 groups
 
         sp_x = torch.zeros(B, H, W, 0, device=device, dtype=dtype)     # no space-only bands (SRTM/DW/WC) available
         sp_m = torch.ones(B, H, W, 3, device=device, dtype=dtype)      # 3 space-only groups, all masked
