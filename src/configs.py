@@ -217,6 +217,20 @@ MODEL_SPECS = {
               "pos-embed would need.",
         implemented=True,
     ),
+    "clay": ModelSpec(
+        name="clay",
+        bands=ALL_12_S2_IDS,        # Clay accepts all 12 bands via wavelength conditioning
+        target_gsd_m=10,            # pretrained at 10m resolution on Sentinel-2
+        patch_size=8,               # same as CROMA — produces 28x28 grid for 224px input
+        embed_dim=1024,             # encoder dim from Clay v1.5 spec
+        native_px=256,              # Clay was pretrained on 256x256 chips
+        weights="made-with-clay/Clay v1.5 (HuggingFace, download clay-v1.5.ckpt)",
+        notes="Dynamic wavelength-conditioned embedding block — accepts any band "
+              "combination via central wavelength inputs, no spectral adapter needed. "
+              "Dual MAE+DINOv2 pretraining objective. Patch size 8x8 matches CROMA "
+              "exactly so token grids align for early fusion without interpolation.",
+        implemented=True,
+    ),
     "galileo": ModelSpec(
         name="galileo", bands=GALILEO_S2_BAND_IDS,
         target_gsd_m=10, patch_size=8, embed_dim=128,   # confirmed for the nano checkpoint via
@@ -274,7 +288,7 @@ MODEL_SPECS = {
 MODEL_NAMES = list(MODEL_SPECS)
 
 FUSION_GROUPS = {
-    "10m": ["croma", "smarties", "galileo"],
+    "10m": ["croma", "smarties", "galileo", "clay"],
     "30m": ["prithvi"],
 }
 
