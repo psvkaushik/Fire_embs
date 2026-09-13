@@ -293,8 +293,12 @@ class SmartiesEncoder(_FrozenAwareModule):
 # ============================================================
 
 _CLAY_S2_WAVELENGTHS = [
-    443, 490, 560, 665, 705, 740, 783, 842, 865, 945, 1610, 2190,
-]   # nanometres, CABUAR_BANDS order (B01..B12) -- see configs.CABUAR_BANDS
+    0.443, 0.490, 0.560, 0.665, 0.705, 0.740, 0.783, 0.842, 0.865, 0.945, 1.610, 2.190,
+]   # MICROMETRES, CABUAR_BANDS order (B01..B12) -- see configs.CABUAR_BANDS.
+    # Clay's DOFA-style DynamicEmbedding was pretrained with wavelengths on the
+    # micrometre scale (cf. Clay's own configs/metadata.yaml: blue=0.493, ...,
+    # swir22=2.19), NOT nanometres -- feeding nm silently corrupts the per-band
+    # conditioning.
 
 
 class ClayEncoder(_FrozenAwareModule):
@@ -323,6 +327,7 @@ class ClayEncoder(_FrozenAwareModule):
         self.patch_size = spec.patch_size
         self.grid_size = resize_px // spec.patch_size
         self.embed_dim = spec.embed_dim * 2   # pre+post concat, same convention as CROMA/SMARTIES
+        self.target_gsd_m = spec.target_gsd_m   # fed to Clay's gsd-aware position encoding
 
         self.register_buffer(
             "_wavelengths",
@@ -333,13 +338,28 @@ class ClayEncoder(_FrozenAwareModule):
     def forward(self, pre: torch.Tensor, post: torch.Tensor) -> torch.Tensor:
         stacked = torch.cat([pre, post], dim=0)   # (2B, 12, H, W)
         B2 = stacked.shape[0]
+        device = stacked.device
 
-        waves = self._wavelengths.unsqueeze(0).expand(B2, -1).to(stacked.device)
-        timestamps = torch.zeros(B2, 4, device=stacked.device)   # [week, hour, lat, lon] -- zeros ok
-
-        tokens, unmsk_idx, msk_idx, msk_matrix = self.model(stacked, timestamps, waves)
+        # Clay v1.5's Encoder.forward takes ONE `datacube` dict -- older Clay
+        # took positional (pixels, time, waves), which is what the
+        # "forward() takes 2 positional arguments but 4 were given" error was.
+        #   pixels [B,C,H,W]
+        #   time   [B,4]  pre-encoded [week_sin, week_cos, hour_sin, hour_cos] -- zeros = no metadata
+        #   latlon [B,4]  pre-encoded [lat_sin, lat_cos, lon_sin, lon_cos]     -- zeros = no metadata
+        #                 (add_encodings hstacks time+latlon and expects width 8:
+        #                  pos_encoding is dim-8, so time_latlon must fill the last 8)
+        #   gsd    scalar TENSOR               -- utils.posemb_sincos_2d_with_gsd calls gsd.to(...)
+        #   waves  [N]    per-band wavelengths -- NOT batched, micrometre scale
+        datacube = {
+            "pixels": stacked,
+            "time": torch.zeros(B2, 4, device=device),
+            "latlon": torch.zeros(B2, 4, device=device),
+            "gsd": torch.tensor(float(self.target_gsd_m), device=device),
+            "waves": self._wavelengths.to(device),
+        }
+        tokens, unmsk_idx, msk_idx, msk_matrix = self.model(datacube)
         # with mask_ratio=0.0 + shuffle=False, tokens should be the FULL grid
-        # in raster order -- unmsk_idx/msk_idx are ignorable here since
+        # (+ CLS) in raster order -- unmsk_idx/msk_idx are ignorable here since
         # nothing was actually masked.
 
         B2_, N, C = tokens.shape

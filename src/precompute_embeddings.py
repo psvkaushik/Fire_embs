@@ -18,8 +18,9 @@ probing, and what was decided here. If you want augmentation back, you're
 back to the live-encoder path (train.py --patches_dir), not this one.
 
 Usage:
-    python precompute_embeddings.py --patches_dir patches/10m --models croma smarties galileo \
-        --out_dir embeddings/10m --croma_ckpt /path/to/CROMA_large.pt --galileo_ckpt_dir /path/to/base
+    python precompute_embeddings.py --patches_dir patches/10m --models croma smarties clay \
+        --out_dir embeddings/10m --croma_ckpt /path/to/CROMA_large.pt \
+        --clay_ckpt /path/to/clay-v1.5.ckpt --clay_metadata /path/to/metadata.yaml
 
 Output layout (per model, per split):
     {out_dir}/{model}/{split}_embeddings.pt
@@ -69,7 +70,8 @@ def _already_done(out_path: str, expected_n: int) -> bool:
 
 
 def precompute_one(model_name: str, patches_dir: str, out_dir: str, device: str,
-                    batch_size: int, croma_ckpt: str, galileo_ckpt_dir: str) -> None:
+                    batch_size: int, croma_ckpt: str, galileo_ckpt_dir: str,
+                    clay_ckpt: str = "clay-v1.5.ckpt", clay_metadata: str = "metadata.yaml") -> None:
     spec = MODEL_SPECS[model_name]
     footprint_m = footprint_m_for([model_name])
     expected_crop_px = native_crop_px_for(footprint_m)
@@ -104,6 +106,9 @@ def precompute_one(model_name: str, patches_dir: str, out_dir: str, device: str,
         kwargs["croma_ckpt"] = croma_ckpt
     if model_name == "galileo":
         kwargs["galileo_checkpoint_folder"] = galileo_ckpt_dir
+    if model_name == "clay":
+        kwargs["clay_ckpt"] = clay_ckpt
+        kwargs["clay_metadata"] = clay_metadata
     enc = build_encoder(model_name, resize_px, device, **kwargs)
     enc.eval()
     for p in enc.parameters():
@@ -112,7 +117,8 @@ def precompute_one(model_name: str, patches_dir: str, out_dir: str, device: str,
     meta = {
         "model": model_name, "footprint_m": footprint_m, "resize_px": resize_px,
         "patches_dir": os.path.abspath(patches_dir),
-        "checkpoint": croma_ckpt if model_name == "croma" else (galileo_ckpt_dir or "default"),
+        "checkpoint": {"croma": croma_ckpt, "galileo": galileo_ckpt_dir or "default",
+                        "clay": clay_ckpt}.get(model_name, "default"),
     }
 
     for split, n in split_ns.items():
@@ -177,6 +183,10 @@ def main():
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--croma_ckpt", default=_default_croma_ckpt())
     p.add_argument("--galileo_ckpt_dir", default=None)
+    p.add_argument("--clay_ckpt", default="clay-v1.5.ckpt",
+                    help="path to clay-v1.5.ckpt (default: relative to the working dir)")
+    p.add_argument("--clay_metadata", default="metadata.yaml",
+                    help="path to Clay's metadata.yaml (default: relative to the working dir)")
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -186,7 +196,8 @@ def main():
             raise NotImplementedError(f"'{model_name}' isn't wired up yet -- see configs.MODEL_SPECS['{model_name}'].")
         print(f"\n=== {model_name} ===")
         precompute_one(model_name, args.patches_dir, args.out_dir, args.device,
-                        args.batch_size, args.croma_ckpt, args.galileo_ckpt_dir)
+                        args.batch_size, args.croma_ckpt, args.galileo_ckpt_dir,
+                        clay_ckpt=args.clay_ckpt, clay_metadata=args.clay_metadata)
 
 
 if __name__ == "__main__":
