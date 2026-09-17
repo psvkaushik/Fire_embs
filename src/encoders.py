@@ -333,6 +333,11 @@ class ClayEncoder(_FrozenAwareModule):
             "_wavelengths",
             torch.tensor(_CLAY_S2_WAVELENGTHS, dtype=torch.float32)
         )
+
+        self.register_buffer(
+            "_gsd",
+            torch.tensor(10.0, dtype=torch.float32)
+        )
         self.frozen = False
 
     def forward(self, pre: torch.Tensor, post: torch.Tensor) -> torch.Tensor:
@@ -352,11 +357,12 @@ class ClayEncoder(_FrozenAwareModule):
         #   waves  [N]    per-band wavelengths -- NOT batched, micrometre scale
         datacube = {
             "pixels": stacked,
-            "time": torch.zeros(B2, 4, device=device),
-            "latlon": torch.zeros(B2, 4, device=device),
+            "time": torch.zeros(B2, 2, device=device),
+            "latlon": torch.zeros(B2, 2, device=device),
             "gsd": torch.tensor(float(self.target_gsd_m), device=device),
             "waves": self._wavelengths.to(device),
         }
+  
         tokens, unmsk_idx, msk_idx, msk_matrix = self.model(datacube)
         # with mask_ratio=0.0 + shuffle=False, tokens should be the FULL grid
         # (+ CLS) in raster order -- unmsk_idx/msk_idx are ignorable here since
