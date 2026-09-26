@@ -273,15 +273,23 @@ MODEL_SPECS = {
     ),
 
     # ---------------- not currently in a fusion group ----------------
-    "satmae": ModelSpec(
-        name="satmae", bands=ALL_12_S2_IDS, target_gsd_m=10, patch_size=8, embed_dim=1024,
-        native_px=96,   # fMoW-Sentinel multispectral variant, its own 10m-native band group
-        weights="sustainlab-group/SatMAE official repo + released .pth (manual download)",
-        notes="Native variant grouped-patch-embeds 10/20m S2 bands SEPARATELY at their own GSD; we'd resample "
-              "everything to one target_gsd_m instead for a consistent framework, at a cost of stretching it "
-              "(its own native footprint is only 960m, so it'd be stretched 2.33x at this group's 2240m). "
-              "Not wired -- standalone-only stub if you want it later.",
-        implemented=False,
+        "satmae": ModelSpec(
+        name="satmae",
+        bands=["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12"],
+        target_gsd_m=10, patch_size=8, embed_dim=1024, native_px=96,
+        weights="sustainlab-group/SatMAE, models_vit_group_channels.py:vit_large_patch16, "
+                "zenodo.org/record/7338613 pretrain-vit-large-e199.pth",
+        notes="3 band-group patch embeds, mean-pooled after transformer blocks (see encoders.SatMAEEncoder).",
+        implemented=True,
+    ),
+    "spectralgpt": ModelSpec(
+        name="spectralgpt", bands=ALL_12_S2_IDS,
+        target_gsd_m=10, patch_size=8, embed_dim=768, native_px=96,
+        weights="danfenghong/IEEE_TPAMI_SpectralGPT, models_vit_tensor.py:vit_base_patch8, "
+                "zenodo.org/records/8412455 SpectralGPT.pth",
+        notes="3D spatial-spectral tubelet (8x8 spatial x 3-band spectral groups, 4 groups total), "
+              "mean-pooled over the spectral-group axis after transformer blocks (see encoders.SpectralGptEncoder).",
+        implemented=True,
     ),
 }
 
