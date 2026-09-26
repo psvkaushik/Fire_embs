@@ -25,10 +25,12 @@ Convention for combining pre/post:
 
 import os
 import sys
+from functools import partial
 
 import numpy as np
 import torch
 import torch.nn as nn
+
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _ROOT not in sys.path:
@@ -409,11 +411,127 @@ class _UnimplementedEncoder(_FrozenAwareModule):
         )
 
 
-class SatMAEEncoder(_UnimplementedEncoder):
+class SatMAEEncoder(_FrozenAwareModule):
     spec_name = "satmae"
-    # TODO: clone sustainlab-group/SatMAE, copy models_vit.py's multispectral ViT-Large, load the released
-    # fMoW-Sentinel checkpoint, batch pre+post like CromaEncoder does.
 
+    def __init__(self, resize_px: int, ckpt_path: str = "pretrain-vit-large-e199.pth",
+                 channel_groups=((0, 1, 2, 6), (3, 4, 5, 7), (8, 9))):
+        super().__init__()
+        spec = MODEL_SPECS["satmae"]
+        assert len(spec.bands) == 10, f"SatMAE group_c checkpoint expects 10 bands, got {len(spec.bands)}"
+        import sys as _sys
+        _satmae_root = os.path.join(_ROOT, "SatMAE")
+        if _satmae_root not in _sys.path:
+            _sys.path.insert(0, _satmae_root)
+        from models_vit_group_channels import vit_large_patch16 as satmae_vit_large
+
+        assert resize_px % spec.patch_size == 0
+        self.patch_size = spec.patch_size
+        self.grid_size = resize_px // spec.patch_size
+        self.num_groups = len(channel_groups)
+
+        self.model = satmae_vit_large(img_size=resize_px, patch_size=spec.patch_size,
+                                       in_chans=len(spec.bands), num_classes=0,
+                                       channel_groups=channel_groups)
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        missing, unexpected = self.model.load_state_dict(ckpt.get("model", ckpt), strict=False)
+        print(f"SatMAE load_state_dict: missing={missing}, unexpected={unexpected}")
+
+        self.embed_dim = self.model.embed_dim * 2
+        self.frozen = False
+
+    def _forward_no_pool(self, x):
+        m = self.model
+        b = x.shape[0]
+        x_c = [m.patch_embed[i](x[:, g, :, :]) for i, g in enumerate(m.channel_groups)]
+        x = torch.stack(x_c, dim=1)
+        _, G, L, D = x.shape
+        ch_e = m.channel_embed.unsqueeze(2).expand(-1, -1, L, -1)
+        pos_e = m.pos_embed[:, 1:, :].unsqueeze(1).expand(-1, G, -1, -1)
+        x = x + torch.cat((pos_e, ch_e), dim=-1)
+        x = x.view(b, -1, D)
+        cls_pc = torch.cat((m.pos_embed[:, :1, :], m.channel_cls_embed), dim=-1)
+        x = torch.cat((cls_pc + m.cls_token.expand(b, -1, -1), x), dim=1)
+        x = m.pos_drop(x)
+        for blk in m.blocks:
+            x = blk(x)
+        return m.norm(x)[:, 1:, :]
+
+    def _encode_one(self, imgs):
+        tokens = self._forward_no_pool(imgs)
+        B, GL, D = tokens.shape
+        g = self.grid_size
+        assert GL == self.num_groups * g * g
+        tokens = tokens.reshape(B, self.num_groups, g, g, D).mean(dim=1)
+        return tokens.permute(0, 3, 1, 2)
+
+    def forward(self, pre, post):
+        stacked = torch.cat([pre, post], dim=0)
+        grid = self._encode_one(stacked)
+        B = pre.shape[0]
+        return torch.cat([grid[:B], grid[B:]], dim=1)
+
+
+class SpectralGptEncoder(_FrozenAwareModule):
+    spec_name = "spectralgpt"
+
+    def __init__(self, resize_px: int, ckpt_path: str = "SpectralGPT.pth"):
+        super().__init__()
+        spec = MODEL_SPECS["spectralgpt"]
+        import sys as _sys
+        _sgpt_root = os.path.join(_ROOT, "IEEE_TPAMI_SpectralGPT")
+        if _sgpt_root not in _sys.path:
+            _sys.path.insert(0, _sgpt_root)
+        from models_vit_tensor import VisionTransformer as SpectralGPTViT
+
+        assert resize_px % spec.patch_size == 0
+        self.patch_size = spec.patch_size
+        self.grid_size = resize_px // spec.patch_size
+        self.num_spectral_groups = len(spec.bands) // 3
+        assert len(spec.bands) % 3 == 0
+
+        self.model = SpectralGPTViT(
+            img_size=resize_px, in_chans=1, patch_size=spec.patch_size,
+            embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
+            num_frames=len(spec.bands), t_patch_size=3,
+            norm_layer=partial(nn.LayerNorm, eps=1e-6), num_classes=0,
+        )
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        missing, unexpected = self.model.load_state_dict(ckpt.get("model", ckpt), strict=False)
+        print(f"SpectralGPT load_state_dict: missing={missing}, unexpected={unexpected}")
+
+        self.embed_dim = getattr(self.model, "embed_dim", 768) * 2
+        self.frozen = False
+
+    def _forward_no_head(self, x):
+        m = self.model
+        x = torch.unsqueeze(x, dim=1)
+        x = m.patch_embed(x)
+        N, T, L, C = x.shape
+        x = x.view([N, T * L, C]) + m.pos_embed[:, :, :]
+        rt = (len(m.blocks) > 0 and hasattr(m.blocks[0].attn, "requires_t_shape")
+              and m.blocks[0].attn.requires_t_shape)
+        if rt:
+            x = x.view([N, T, L, C])
+        for blk in m.blocks:
+            x = blk(x)
+        if rt:
+            x = x.view([N, T * L, C])
+        return m.norm(x)
+
+    def _encode_one(self, imgs):
+        tokens = self._forward_no_head(imgs)
+        B, TL, C = tokens.shape
+        g, T = self.grid_size, self.num_spectral_groups
+        assert TL == T * g * g
+        tokens = tokens.reshape(B, T, g, g, C).mean(dim=1)
+        return tokens.permute(0, 3, 1, 2)
+
+    def forward(self, pre, post):
+        stacked = torch.cat([pre, post], dim=0)
+        grid = self._encode_one(stacked)
+        B = pre.shape[0]
+        return torch.cat([grid[:B], grid[B:]], dim=1)
 
 # ============================================================
 # Galileo -- best-effort real implementation, grounded directly in
@@ -560,6 +678,7 @@ ENCODER_CLASSES = {
     "smarties": SmartiesEncoder,
     "galileo": GalileoEncoder,
     "satmae": SatMAEEncoder,
+    "spectralgpt": SpectralGptEncoder,
     "clay": ClayEncoder,
 }
 
@@ -568,7 +687,9 @@ def build_encoder(model_name: str, resize_px: int, device: str,
                    croma_ckpt: str = "/mnt/beegfs/spillal2/caburn/Emb_For_Fire/CROMA_large.pt",
                    galileo_checkpoint_folder: str = None,
                    clay_ckpt: str = "clay-v1.5.ckpt",
-                   clay_metadata: str = "metadata.yaml") -> nn.Module:
+                   clay_metadata: str = "metadata.yaml",
+                   satmae_ckpt: str = "pretrain-vit-large-e199.pth",
+                   spectralgpt_ckpt: str = "SpectralGPT.pth") -> nn.Module:
     cls = ENCODER_CLASSES[model_name]
     if model_name == "croma":
         enc = cls(resize_px, ckpt_path=croma_ckpt)
@@ -577,6 +698,10 @@ def build_encoder(model_name: str, resize_px: int, device: str,
         enc = cls(resize_px, **kwargs)
     elif model_name == "clay":
         enc = cls(resize_px, ckpt_path=clay_ckpt, metadata_path=clay_metadata)
+    elif model_name == "satmae":
+        enc = cls(resize_px, ckpt_path=satmae_ckpt)
+    elif model_name == "spectralgpt":
+        enc = cls(resize_px, ckpt_path=spectralgpt_ckpt)
     else:
         enc = cls(resize_px)
     return enc.to(device)
