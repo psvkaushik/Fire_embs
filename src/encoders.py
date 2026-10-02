@@ -434,11 +434,50 @@ class SatMAEEncoder(_FrozenAwareModule):
                                        in_chans=len(spec.bands), num_classes=0,
                                        channel_groups=channel_groups)
         ckpt = torch.load(ckpt_path, map_location="cpu")
-        missing, unexpected = self.model.load_state_dict(ckpt.get("model", ckpt), strict=False)
-        print(f"SatMAE load_state_dict: missing={missing}, unexpected={unexpected}")
+        state = ckpt.get("model", ckpt)
+        # pos_embed in the MAE checkpoint is the fixed (requires_grad=False) sin-cos table for the
+        # 96px/12x12 pretraining grid -- shape-incompatible at any other resize_px (strict=False does
+        # NOT skip shape mismatches). The model's __init__ already built the exact sin-cos table for
+        # this grid, so drop the checkpoint's copy rather than interpolating it. decoder_*/mask_token
+        # keys are MAE-only and land in `unexpected`; channel_cls_embed isn't in the MAE checkpoint and
+        # stays at its zero init, same as SatMAE's own main_finetune.py.
+        state = {k: v for k, v in state.items() if k != "pos_embed"}
+        missing, unexpected = self.model.load_state_dict(state, strict=False)
+        unexpected = [k for k in unexpected if not k.startswith("decoder_") and k != "mask_token"]
+        print(f"SatMAE load_state_dict: missing={missing}, unexpected (non-decoder)={unexpected}")
+        loaded_blocks = [k for k in state if k.startswith("blocks.")]
+        assert loaded_blocks, f"no encoder 'blocks.*' keys found in {ckpt_path} -- wrong checkpoint?"
 
         self.embed_dim = self.model.embed_dim * 2
         self.frozen = False
+
+        # undo loader.py's generic CaBuAr-wide normalization (~0-1 reflectance scale), convert to
+        # the raw-DN scale SatMAE's own stats assume, then replicate SatMAE's own SentinelNormalize
+        # (clip to [mean-2*std, mean+2*std], rescale to [0,1]) -- NOT a z-score. See
+        # configs.SATMAE_S2_MEAN/STD's docstring; same undo-then-reapply approach as
+        # GalileoEncoder._renormalize, different final transform.
+        from configs import CABUAR_S2_MEAN, CABUAR_S2_STD, SATMAE_S2_MEAN, SATMAE_S2_STD
+        from band_utils import band_indices
+        idx = band_indices(spec.bands)
+        n_bands = len(spec.bands)
+        loader_mean = torch.tensor(CABUAR_S2_MEAN)[idx].view(1, n_bands, 1, 1)
+        loader_std = torch.tensor(CABUAR_S2_STD)[idx].view(1, n_bands, 1, 1)
+        satmae_mean = torch.tensor(SATMAE_S2_MEAN).view(1, n_bands, 1, 1)
+        satmae_std = torch.tensor(SATMAE_S2_STD).view(1, n_bands, 1, 1)
+        self.register_buffer("_loader_mean", loader_mean, persistent=False)
+        self.register_buffer("_loader_std", loader_std, persistent=False)
+        self.register_buffer("_satmae_min", satmae_mean - 2 * satmae_std, persistent=False)
+        self.register_buffer("_satmae_max", satmae_mean + 2 * satmae_std, persistent=False)
+
+    def _renormalize(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (B, 10, H, W), already normalized by loader.py's shared CaBuAr-wide stats.
+        Undoes that back to raw reflectance, converts to raw DN (reflectance * 10000,
+        standard Sentinel-2 L2A convention -- see GalileoEncoder._renormalize), then applies
+        SatMAE's own SentinelNormalize affine clip-and-rescale to [0, 1] (NOT a z-score)."""
+        raw_reflectance = x * self._loader_std + self._loader_mean
+        raw_dn = raw_reflectance * 10000.0
+        rescaled = (raw_dn - self._satmae_min) / (self._satmae_max - self._satmae_min)
+        return rescaled.clamp(0.0, 1.0)
 
     def _forward_no_pool(self, x):
         m = self.model
@@ -466,6 +505,7 @@ class SatMAEEncoder(_FrozenAwareModule):
         return tokens.permute(0, 3, 1, 2)
 
     def forward(self, pre, post):
+        pre, post = self._renormalize(pre), self._renormalize(post)
         stacked = torch.cat([pre, post], dim=0)
         grid = self._encode_one(stacked)
         B = pre.shape[0]

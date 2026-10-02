@@ -71,7 +71,8 @@ def _already_done(out_path: str, expected_n: int) -> bool:
 
 def precompute_one(model_name: str, patches_dir: str, out_dir: str, device: str,
                     batch_size: int, croma_ckpt: str, galileo_ckpt_dir: str,
-                    clay_ckpt: str = "clay-v1.5.ckpt", clay_metadata: str = "metadata.yaml") -> None:
+                    clay_ckpt: str = "clay-v1.5.ckpt", clay_metadata: str = "metadata.yaml",
+                    satmae_ckpt: str = "pretrain-vit-large-e199.pth") -> None:
     spec = MODEL_SPECS[model_name]
     footprint_m = footprint_m_for([model_name])
     expected_crop_px = native_crop_px_for(footprint_m)
@@ -109,6 +110,8 @@ def precompute_one(model_name: str, patches_dir: str, out_dir: str, device: str,
     if model_name == "clay":
         kwargs["clay_ckpt"] = clay_ckpt
         kwargs["clay_metadata"] = clay_metadata
+    if model_name == "satmae":
+        kwargs["satmae_ckpt"] = satmae_ckpt
     enc = build_encoder(model_name, resize_px, device, **kwargs)
     enc.eval()
     for p in enc.parameters():
@@ -118,7 +121,7 @@ def precompute_one(model_name: str, patches_dir: str, out_dir: str, device: str,
         "model": model_name, "footprint_m": footprint_m, "resize_px": resize_px,
         "patches_dir": os.path.abspath(patches_dir),
         "checkpoint": {"croma": croma_ckpt, "galileo": galileo_ckpt_dir or "default",
-                        "clay": clay_ckpt}.get(model_name, "default"),
+                        "clay": clay_ckpt, "satmae": satmae_ckpt}.get(model_name, "default"),
     }
 
     for split, n in split_ns.items():
@@ -187,6 +190,8 @@ def main():
                     help="path to clay-v1.5.ckpt (default: relative to the working dir)")
     p.add_argument("--clay_metadata", default="metadata.yaml",
                     help="path to Clay's metadata.yaml (default: relative to the working dir)")
+    p.add_argument("--satmae_ckpt", default="pretrain-vit-large-e199.pth",
+                    help="path to SatMAE's pretrain-vit-large-e199.pth (default: relative to the working dir)")
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -197,7 +202,8 @@ def main():
         print(f"\n=== {model_name} ===")
         precompute_one(model_name, args.patches_dir, args.out_dir, args.device,
                         args.batch_size, args.croma_ckpt, args.galileo_ckpt_dir,
-                        clay_ckpt=args.clay_ckpt, clay_metadata=args.clay_metadata)
+                        clay_ckpt=args.clay_ckpt, clay_metadata=args.clay_metadata,
+                        satmae_ckpt=args.satmae_ckpt)
 
 
 if __name__ == "__main__":

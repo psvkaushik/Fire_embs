@@ -16,7 +16,7 @@ Nothing here does tensor work -- see resample.py / band_utils.py / loader.py.
 Currently wired: croma, smarties, prithvi (fully working), galileo (code
 written and grounded in their actual source, but not yet shape-verified
 against a live checkpoint -- see encoders.GalileoEncoder / SETUP.md).
-satmae is kept as a standalone-only stub. scalemae/clay/dofa were removed
+satmae is wired into the 10m group (fusable with croma). scalemae/clay/dofa were removed
 (see git history if you want them back) -- ScaleMAE was actually fully
 wired via torchgeo, Clay/DOFA were stubs.
 """
@@ -149,6 +149,34 @@ GALILEO_S2_STD = [
 GALILEO_DEFAULT_MONTH = 5   # their own fallback (src/data/dataset.py DEFAULT_MONTH) when no real acquisition
                              # month is available -- NOT 0, which is what an earlier version of this code used
 
+# ------------------------------------------------------------
+# SatMAE's OWN per-band stats, for the 10 S2 bands in GALILEO_S2_BAND_IDS
+# order (same order as MODEL_SPECS['satmae'].bands). Sourced directly from
+# SatMAE/util/datasets.py's SentinelIndividualImageDataset.mean/.std (the
+# 13-band fMoW-Sentinel stats, standard Sentinel-2 stack order B01, B02,
+# ..., B8A, B09, B10, B11, B12), with indices [0, 9, 10] (B01/aerosol,
+# B09/water_vapour, B10/cirrus) dropped -- exactly matching the official
+# group_c pretraining command's `--dropped_bands 0 9 10`
+# (SatMAE/README.md). Raw-DN-scale, NOT the ~0-1 reflectance scale
+# loader.py's shared S2_MEAN/S2_STD produces.
+#
+# IMPORTANT: SatMAE does NOT z-score normalize -- its own SentinelNormalize
+# transform (SatMAE/util/datasets.py) clips each band to
+# [mean - 2*std, mean + 2*std] and affinely rescales that range to [0, 1]
+# (originally to uint8 [0,255], then ToTensor's /255 -- composing those two
+# steps is exactly a continuous rescale to [0,1], so the uint8 round trip
+# can be skipped for inference). encoders.SatMAEEncoder._renormalize
+# replicates this clip-and-rescale, NOT a z-score -- see GalileoEncoder's
+# docstring for why reusing that pattern here would be wrong.
+# ------------------------------------------------------------
+
+SATMAE_S2_MEAN = [1184.3824625, 1120.77120066, 1136.26026392, 1263.73947144,
+                  1645.40315151, 1846.87040806, 1762.59530783, 1972.62420416,
+                  1732.16362238, 1247.91870117]
+SATMAE_S2_STD = [650.2842772, 712.12507725, 965.23119807, 948.9819932,
+                 1108.06650639, 1258.36394548, 1233.1492281, 1364.38688993,
+                 1310.36996126, 1087.6020813]
+
 # ============================================================
 # PER-MODEL SPEC
 #
@@ -260,6 +288,19 @@ MODEL_SPECS = {
         implemented=True,
     ),
 
+    "satmae": ModelSpec(
+        name="satmae", bands=GALILEO_S2_BAND_IDS,   # group_c checkpoint: 13 S2 bands minus B01/B09/B10
+        target_gsd_m=10, patch_size=8, embed_dim=1024, native_px=96,
+        weights="sustainlab-group/SatMAE, models_vit_group_channels.py:vit_large_patch16 "
+                "(group_c, --input_size 96 --patch_size 8), zenodo.org/record/7338613 pretrain-vit-large-e199.pth",
+        notes="3 band-group patch embeds ((B02,B03,B04,B08), (B05,B06,B07,B8A), (B11,B12)), mean-pooled over "
+              "groups after the transformer blocks (see encoders.SatMAEEncoder). Fixed 2D sin-cos pos-embed "
+              "(requires_grad=False in pretraining), recomputed exactly for the 28x28 grid at this group's "
+              "2240m footprint -- 2.33x its native 960m, same no-interpolation argument as smarties. "
+              "Patch 8 @ 224px -> 28x28 grid, identical to croma's, so fusion needs no regridding.",
+        implemented=True,
+    ),
+
     # ---------------- 30m group ----------------
     "prithvi": ModelSpec(
         name="prithvi", bands=["B02", "B03", "B04", "B8A", "B11", "B12"], target_gsd_m=30, patch_size=16,
@@ -273,15 +314,6 @@ MODEL_SPECS = {
     ),
 
     # ---------------- not currently in a fusion group ----------------
-        "satmae": ModelSpec(
-        name="satmae",
-        bands=["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12"],
-        target_gsd_m=10, patch_size=8, embed_dim=1024, native_px=96,
-        weights="sustainlab-group/SatMAE, models_vit_group_channels.py:vit_large_patch16, "
-                "zenodo.org/record/7338613 pretrain-vit-large-e199.pth",
-        notes="3 band-group patch embeds, mean-pooled after transformer blocks (see encoders.SatMAEEncoder).",
-        implemented=True,
-    ),
     "spectralgpt": ModelSpec(
         name="spectralgpt", bands=ALL_12_S2_IDS,
         target_gsd_m=10, patch_size=8, embed_dim=768, native_px=96,
@@ -296,7 +328,7 @@ MODEL_SPECS = {
 MODEL_NAMES = list(MODEL_SPECS)
 
 FUSION_GROUPS = {
-    "10m": ["croma", "smarties", "galileo", "clay"],
+    "10m": ["croma", "smarties", "galileo", "clay", "satmae"],
     "30m": ["prithvi"],
 }
 
@@ -327,7 +359,7 @@ def footprint_m_for(model_names: list) -> float:
     """The physical ground footprint (meters) this run's models should be
     cropped/resampled from. If every model shares a FUSION_GROUPS entry,
     uses that group's footprint. If it's a single model NOT in any group
-    (currently just satmae), falls back to that model's own native
+    (currently just spectralgpt), falls back to that model's own native
     footprint so it can still be run standalone."""
     groups = {group_of(m) for m in model_names}
     if len(groups) == 1 and None not in groups:

@@ -5,3 +5,7 @@ src/embeddings/
 src/embeddings_10m_comparison
 src/models_10m_comparison
 src/patches
+jobs/
+jobs_old/
+.venv/
+__pycache__/
