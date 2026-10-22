@@ -40,7 +40,7 @@ final_emb_code/
 │   ├── job_pairs.sh              # 9 runs:  3 pairs x 3 fusions
 │   └── job_triple.sh             # 3 runs:  croma+smarties+copernicusfm x 3 fusions
 └── src/                          # run everything from here
-    ├── configs.py  preprocess.py  band_utils.py  resample.py      # specs, per-model normalization, band/resize utils
+    ├── configs.py  band_utils.py  resample.py                     # specs, band/resize utils
     ├── loader.py  prepare_patches.py                              # CaBuAr tiling
     ├── encoders.py  precompute_embeddings.py                      # frozen encoders -> cached embeddings
     └── cached_loader.py  cached_models.py  fusion.py  heads.py  train_cached.py  train_utils.py   # heads/fusion training
@@ -56,10 +56,9 @@ final_emb_code/
 | **smarties** | Nothing manual. `transformers.AutoModel.from_pretrained("gsumbul/SMARTIES-v1-ViT-L", trust_remote_code=True)` downloads on first use, so it needs internet access or a pre-populated `~/.cache/huggingface` (run once on a login node). |
 | **copernicusfm** | (1) `git clone https://github.com/zhu-xlab/Copernicus-FM.git CopernicusFM_repo` in the repo root (code is loaded from `CopernicusFM_repo/Copernicus-FM/src`). (2) `wget https://huggingface.co/wangyi111/Copernicus-FM/resolve/main/CopernicusFM_ViT_base_varlang_e100.pth` into the repo root (default; override with `--copernicusfm_ckpt`). ViT-B/16, takes all 12 S2 bands via per-band wavelength/bandwidth, 14x14 grid at 224px. |
 
-**Input normalization.** CaBuAr values are raw S2 DN. `src/preprocess.py` (`S2Normalizer`) converts the loader's tensors back to DN
-and applies each model's own pretraining normalization (CROMA: SSL4EO-L2A mean+/-2std; SMARTIES: percentile + standardize;
-Copernicus-FM: z-score).
-Embeddings cached before this change were computed on mis-scaled inputs -- delete and recompute them.
+**Input normalization.** Every model receives the same input: CaBuAr's per-band z-score (`CABUAR_S2_MEAN/STD` in `src/configs.py`,
+applied in `src/loader.py`). No model-specific normalization is applied. Copernicus-FM is additionally given each band's central
+wavelength and bandwidth (nm), and its token output gets a per-token LayerNorm because the checkpoint ships no final norm.
 
 Dataset: nothing to download by hand. `src/loader.py` pulls `DarthReca/california_burned_areas` from the
 HF Hub on first run (a few GB, cached under `~/.cache/huggingface`). Needs internet access.
@@ -90,6 +89,13 @@ python train_cached.py --models croma smarties copernicusfm --fusion early \
 ```
 
 `--fusion` choices are defined in `src/fusion.py` (`early`, `sep_dec`, `late`); see `train_cached.py --help`.
+
+### Training protocol (as in the `jobs/*.out` logs)
+
+Heads are trained on the cached embeddings with: lr 1e-4, weight decay 1e-4, 40 epochs max, early stopping with patience 8
+on validation F1 at the best threshold, and the best-validation checkpoint reloaded for testing at the validation-tuned
+threshold. No augmentation (embeddings are precomputed once per tile). Fusion heads include the projection/decoder layers from
+`src/cached_models.py` (`--proj_dim 256`, `--dec_dim 128`).
 
 ### SLURM jobs
 

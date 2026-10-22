@@ -34,7 +34,6 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from configs import MODEL_SPECS
-from preprocess import S2Normalizer
 
 
 class _FrozenAwareModule(nn.Module):
@@ -72,14 +71,13 @@ class CromaEncoder(_FrozenAwareModule):
             pretrained_path=ckpt_path, size="large", modality="optical", image_resolution=resize_px
         )
         self.embed_dim = self.model.encoder_dim * 2   # pre+post concat
-        self.prep = S2Normalizer("croma")
         self.patch_size = spec.patch_size
         self.grid_size = resize_px // spec.patch_size
         self.frozen = False
 
     def forward(self, pre: torch.Tensor, post: torch.Tensor) -> torch.Tensor:
         stacked = torch.cat([pre, post], dim=0)
-        tokens = self.model(optical_images=self.prep(stacked))["optical_encodings"]
+        tokens = self.model(optical_images=stacked)["optical_encodings"]
         B2, N, C = tokens.shape
         g = self.grid_size
         assert N == g * g, f"CROMA: expected {g*g} tokens, got {N}"
@@ -230,12 +228,11 @@ class SmartiesEncoder(_FrozenAwareModule):
                 f"against this checkpoint's spectrum_specs.yaml)."
             )
         self.bands = [_S2ID_TO_SMARTIES_NAME[b] for b in spec.bands]
-        self.prep = S2Normalizer("smarties")
         self.frozen = False
 
     def forward(self, pre: torch.Tensor, post: torch.Tensor) -> torch.Tensor:
         stacked = torch.cat([pre, post], dim=0)
-        tokens = smarties_encode(self.model, self.prep(stacked), self.bands, self.grid_size)
+        tokens = smarties_encode(self.model, stacked, self.bands, self.grid_size)
         tokens = tokens[:, 1:, :]
         B2, N, C = tokens.shape
         g = self.grid_size
@@ -307,17 +304,16 @@ class CopernicusFMEncoder(_FrozenAwareModule):
         print(f"CopernicusFM load_state_dict: missing={msg.missing_keys}, "
               f"unexpected={len(msg.unexpected_keys)} keys")
 
-        self.prep = S2Normalizer("copernicusfm")
         self.register_buffer("_wvs", torch.tensor(_S2_WAVELENGTH_NM, dtype=torch.float32), persistent=False)
         self.embed_dim = self.model.blocks[0].norm1.normalized_shape[0] * 2   # pre+post concat
         self.frozen = False
 
     def _encode_one(self, imgs):
         meta = torch.full((imgs.shape[0], 4), float("nan"), device=imgs.device)   # lon/lat/time/area unknown
-        _, feats = self.model(self.prep(imgs), meta, _S2_WAVELENGTH_NM, _S2_BANDWIDTH_NM, None, "spectral", self.kernel_size)
+        _, feats = self.model(imgs, meta, _S2_WAVELENGTH_NM, _S2_BANDWIDTH_NM, None, "spectral", self.kernel_size)
         grid = feats[-1]
-        # Block outputs are pre-final-norm (an earlier, mis-scaled input made them huge, std ~2.5e4) -- the ckpt ships
-        # no trained final norm (fc_norm.* missing), so apply a plain per-token LayerNorm over channels.
+        # Block outputs are pre-final-norm and the ckpt ships no trained final norm (fc_norm.* missing),
+        # so apply a plain per-token LayerNorm over channels.
         grid = torch.nn.functional.layer_norm(grid.permute(0, 2, 3, 1), (grid.shape[1],)).permute(0, 3, 1, 2)
         g = self.grid_size
         assert grid.shape[-2:] == (g, g), f"CopernicusFM: expected {g}x{g} grid, got {tuple(grid.shape[-2:])}"
