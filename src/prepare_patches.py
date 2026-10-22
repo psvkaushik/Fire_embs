@@ -1,5 +1,5 @@
 """
-fusion_v2/prepare_patches.py
+prepare_patches.py
 =============================
 One-off preprocessing: tiles every CaBuAr pre/post/mask source image in each
 split into a FULL grid of native crop_px x crop_px (20m/px) windows and
@@ -10,7 +10,6 @@ different GSD groups use different shared footprints -- run this once per
 group you plan to train on:
 
     python prepare_patches.py --group 10m --out_dir patches/10m
-    python prepare_patches.py --group 30m --out_dir patches/30m
 
 Patches are still model-agnostic WITHIN a group: band selection and
 per-model resize happen later, at train time, in loader.py's PatchDataset

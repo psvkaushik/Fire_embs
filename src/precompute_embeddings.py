@@ -1,26 +1,24 @@
 """
-fusion_v2/precompute_embeddings.py
+precompute_embeddings.py
 =====================================
 Runs a frozen encoder ONCE over every patch in {train,val,test}_patches.pt
 (from prepare_patches.py) and saves the resulting feature maps to disk, so
-train_cached.py never has to run the (expensive, especially for galileo
-base) encoder forward pass again.
+train_cached.py never has to run the (expensive)
+encoder forward pass again.
 
 DELIBERATE SCOPE DECISION: no augmentation. loader.py's flip/rot90
 augmentation gives the live-encoder path a different pixel arrangement
 every epoch; caching that exactly would mean either 16x the storage (one
 cache entry per flip/rotation combo) or an approximation that's actually
-wrong for Galileo specifically (absolute sin-cos position embeddings mean
-flipping a CACHED output is not equivalent to encoding a flipped INPUT --
-see the conversation this script came out of). Dropping augmentation
+wrong (absolute sin-cos position embeddings mean flipping a CACHED output
+is not equivalent to encoding a flipped INPUT). Dropping augmentation
 entirely is the standard, simpler choice for frozen-backbone linear
 probing, and what was decided here. If you want augmentation back, you're
 back to the live-encoder path (train.py --patches_dir), not this one.
 
 Usage:
-    python precompute_embeddings.py --patches_dir patches/10m --models croma smarties clay \
-        --out_dir embeddings/10m --croma_ckpt /path/to/CROMA_large.pt \
-        --clay_ckpt /path/to/clay-v1.5.ckpt --clay_metadata /path/to/metadata.yaml
+    python precompute_embeddings.py --patches_dir patches/10m --models croma smarties copernicusfm \
+        --out_dir embeddings/10m --croma_ckpt /path/to/CROMA_large.pt
 
 Output layout (per model, per split):
     {out_dir}/{model}/{split}_embeddings.pt
@@ -70,8 +68,8 @@ def _already_done(out_path: str, expected_n: int) -> bool:
 
 
 def precompute_one(model_name: str, patches_dir: str, out_dir: str, device: str,
-                    batch_size: int, croma_ckpt: str, galileo_ckpt_dir: str,
-                    clay_ckpt: str = "clay-v1.5.ckpt", clay_metadata: str = "metadata.yaml") -> None:
+                    batch_size: int, croma_ckpt: str,
+                    copernicusfm_ckpt: str = None) -> None:
     spec = MODEL_SPECS[model_name]
     footprint_m = footprint_m_for([model_name])
     expected_crop_px = native_crop_px_for(footprint_m)
@@ -104,11 +102,8 @@ def precompute_one(model_name: str, patches_dir: str, out_dir: str, device: str,
     kwargs = {}
     if model_name == "croma":
         kwargs["croma_ckpt"] = croma_ckpt
-    if model_name == "galileo":
-        kwargs["galileo_checkpoint_folder"] = galileo_ckpt_dir
-    if model_name == "clay":
-        kwargs["clay_ckpt"] = clay_ckpt
-        kwargs["clay_metadata"] = clay_metadata
+    if model_name == "copernicusfm" and copernicusfm_ckpt:
+        kwargs["copernicusfm_ckpt"] = copernicusfm_ckpt
     enc = build_encoder(model_name, resize_px, device, **kwargs)
     enc.eval()
     for p in enc.parameters():
@@ -117,8 +112,8 @@ def precompute_one(model_name: str, patches_dir: str, out_dir: str, device: str,
     meta = {
         "model": model_name, "footprint_m": footprint_m, "resize_px": resize_px,
         "patches_dir": os.path.abspath(patches_dir),
-        "checkpoint": {"croma": croma_ckpt, "galileo": galileo_ckpt_dir or "default",
-                        "clay": clay_ckpt}.get(model_name, "default"),
+        "checkpoint": {"croma": croma_ckpt,
+                        "copernicusfm": copernicusfm_ckpt}.get(model_name, "default"),
     }
 
     for split, n in split_ns.items():
@@ -166,8 +161,8 @@ def precompute_one(model_name: str, patches_dir: str, out_dir: str, device: str,
         json.dump(meta, f, indent=2)
 
     # free this model's encoder (and any lingering GPU cache) before the next
-    # model loads -- without this, memory from a big checkpoint (e.g. galileo
-    # base) can stay resident while the next model's encoder is being built
+    # model loads -- without this, memory from a big checkpoint (e.g. a ViT-L)
+    # can stay resident while the next model's encoder is being built
     del enc
     gc.collect()
     if device.startswith("cuda"):
@@ -182,11 +177,8 @@ def main():
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--batch_size", type=int, default=8)
     p.add_argument("--croma_ckpt", default=_default_croma_ckpt())
-    p.add_argument("--galileo_ckpt_dir", default=None)
-    p.add_argument("--clay_ckpt", default="clay-v1.5.ckpt",
-                    help="path to clay-v1.5.ckpt (default: relative to the working dir)")
-    p.add_argument("--clay_metadata", default="metadata.yaml",
-                    help="path to Clay's metadata.yaml (default: relative to the working dir)")
+    p.add_argument("--copernicusfm_ckpt", default=None,
+                    help="Copernicus-FM ViT-B checkpoint (default: <repo_root>/CopernicusFM_ViT_base_varlang_e100.pth)")
     args = p.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -196,8 +188,8 @@ def main():
             raise NotImplementedError(f"'{model_name}' isn't wired up yet -- see configs.MODEL_SPECS['{model_name}'].")
         print(f"\n=== {model_name} ===")
         precompute_one(model_name, args.patches_dir, args.out_dir, args.device,
-                        args.batch_size, args.croma_ckpt, args.galileo_ckpt_dir,
-                        clay_ckpt=args.clay_ckpt, clay_metadata=args.clay_metadata)
+                        args.batch_size, args.croma_ckpt,
+                        copernicusfm_ckpt=args.copernicusfm_ckpt)
 
 
 if __name__ == "__main__":

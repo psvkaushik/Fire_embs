@@ -1,5 +1,5 @@
 """
-fusion_v2/loader.py
+loader.py
 ====================
 Same crop/augment/tile machinery as v1, generalized twice over:
   1. any subset of configs.MODEL_SPECS can be requested (build_loaders(model_names=...))
@@ -7,7 +7,7 @@ Same crop/augment/tile machinery as v1, generalized twice over:
      are now derived from configs.footprint_m_for(model_names) -- the RUN's
      shared ground footprint (per GSD group) -- instead of one hardcoded
      168px crop for everything. A 10m-group run crops 112px (=2240m/20m)
-     from CaBuAr; a 30m-group run crops 336px (=6720m/20m). See configs.py
+     from CaBuAr. See configs.py
      for why those numbers.
 
 Per model, a "view" is: band_utils.select_bands (pick this model's bands)
@@ -335,7 +335,7 @@ class PatchDataset(Dataset):
 def build_patch_loaders(patches_dir: str, model_names: list, batch_size: int = BATCH_SIZE,
                          eval_batch_size: "int | None" = None, num_workers: int = 4):
     """patches_dir should be the GROUP-specific directory written by
-    `prepare_patches.py --group 10m` (or 30m) -- i.e. containing
+    `prepare_patches.py --group 10m` -- i.e. containing
     train_patches.pt / val_patches.pt / test_patches.pt for models_names'
     shared GSD group."""
     eval_batch_size = eval_batch_size or batch_size

@@ -1,0 +1,34 @@
+[project]
+name = "fire-embs"
+version = "0.1.0"
+description = "Frozen EO foundation-model embeddings (CROMA, SMARTIES, Copernicus-FM) + heads for CaBuAr burned-area segmentation"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "torch>=2.1,<2.6",
+    "numpy<2",
+    "einops",
+    # Copernicus-FM code uses timm ViT blocks; 1.x changed internals
+    "timm>=0.9,<1.0",
+    "transformers>=4.40,<5",        # SMARTIES loads via trust_remote_code
+    # loader.py uses load_dataset(..., trust_remote_code=True); script datasets were removed in datasets 4.0
+    "datasets>=2.19,<4",
+    "scikit-learn",
+    "matplotlib",
+    "tqdm",
+    # CaBuAr ships as HDF5 + BZip2 filter -- required
+    "h5py",
+    "hdf5plugin",
+]
+
+# Pull CUDA 12.1 wheels for torch (works with driver 580). Change the index for another CUDA.
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv]
+package = false

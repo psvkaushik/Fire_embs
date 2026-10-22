@@ -1,5 +1,5 @@
 """
-fusion_v2/train_utils.py
+train_utils.py
 ===========================
 Loss, metrics, and plotting -- shared by both train.py (live encoders) and
 train_cached.py (precomputed embeddings). Deliberately has NO import of
@@ -88,8 +88,9 @@ def plot_history(history: dict, plot_dir: str) -> None:
     fig.tight_layout(); fig.savefig(os.path.join(plot_dir, "loss_curve.png")); plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(epochs, history["val_f1"], label="val F1 (thr=0.5)")
-    ax.plot(epochs, history["val_f1_best_thr"], label="val F1 (best thr)", linestyle="--")
+    ax.plot(epochs, history["val_f1"], label="val F1")
+    if "val_f1_best_thr" in history:
+        ax.plot(epochs, history["val_f1_best_thr"], label="val F1 (best thr)", linestyle="--")
     ax.set_xlabel("epoch"); ax.set_ylabel("F1"); ax.set_ylim(0, 1); ax.set_title("Validation F1")
     ax.legend(); ax.grid(alpha=0.3)
     fig.tight_layout(); fig.savefig(os.path.join(plot_dir, "f1_curve.png")); plt.close(fig)

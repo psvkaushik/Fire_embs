@@ -1,5 +1,5 @@
 """
-fusion_v2/fusion.py
+fusion.py
 ======================
 Two things live here:
 

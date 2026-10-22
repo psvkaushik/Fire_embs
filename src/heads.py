@@ -1,5 +1,5 @@
 """
-fusion_v2/heads.py
+heads.py
 =====================
 Two head styles, both taking a (B, C, g, g) token-grid feature map (from one
 encoder, or an already-fused multi-encoder feature map) and producing

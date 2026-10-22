@@ -1,5 +1,5 @@
 """
-fusion_v2/cached_loader.py
+cached_loader.py
 =============================
 Dataset/loader for training on embeddings precomputed by
 precompute_embeddings.py, instead of running encoders live.
@@ -37,10 +37,10 @@ class CachedEmbeddingDataset(Dataset):
                     f"No cached embeddings at {emb_path} -- run precompute_embeddings.py "
                     f"--models {name} first."
                 )
-            self.embeddings[name] = torch.load(emb_path)
+            self.embeddings[name] = torch.load(emb_path, weights_only=True)
 
         mask_path = os.path.join(patches_dir, f"{split}_patches.pt")
-        self.mask = torch.load(mask_path)["mask"]
+        self.mask = torch.load(mask_path, weights_only=True)["mask"]
 
         n = self.mask.shape[0]
         for name, emb in self.embeddings.items():
@@ -68,7 +68,7 @@ class CachedEmbeddingDataset(Dataset):
 
 def build_cached_loaders(embeddings_dir: str, patches_dir: str, model_names: list,
                           batch_size: int = BATCH_SIZE, eval_batch_size: "int | None" = None,
-                          num_workers: int = 4):
+                          num_workers: int = 4, seed: int = 0):
     eval_batch_size = eval_batch_size or batch_size
 
     train_ds = CachedEmbeddingDataset(embeddings_dir, patches_dir, model_names, "train")
@@ -76,9 +76,10 @@ def build_cached_loaders(embeddings_dir: str, patches_dir: str, model_names: lis
     test_ds = CachedEmbeddingDataset(embeddings_dir, patches_dir, model_names, "test")
 
     persistent = num_workers > 0
+    gen = torch.Generator().manual_seed(seed)
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers,
-        pin_memory=True, drop_last=True, persistent_workers=persistent,
+        pin_memory=True, drop_last=True, persistent_workers=persistent, generator=gen,
     )
     val_loader = DataLoader(
         val_ds, batch_size=eval_batch_size, shuffle=False, num_workers=num_workers,

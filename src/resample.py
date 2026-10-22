@@ -1,5 +1,5 @@
 """
-fusion_v2/resample.py
+resample.py
 ========================
 Resamples a crop to an explicit target pixel size. Area-interpolation when
 shrinking (genuinely averages pixels together, simulating a coarser

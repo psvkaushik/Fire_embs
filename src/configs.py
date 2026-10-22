@@ -1,5 +1,5 @@
 """
-fusion_v2/configs.py
+configs.py
 ======================
 Single source of truth for:
   - CaBuAr's 12 Sentinel-2 channels: which S2 band each index is, its TRUE
@@ -13,12 +13,7 @@ Single source of truth for:
 
 Nothing here does tensor work -- see resample.py / band_utils.py / loader.py.
 
-Currently wired: croma, smarties, prithvi (fully working), galileo (code
-written and grounded in their actual source, but not yet shape-verified
-against a live checkpoint -- see encoders.GalileoEncoder / SETUP.md).
-satmae is kept as a standalone-only stub. scalemae/clay/dofa were removed
-(see git history if you want them back) -- ScaleMAE was actually fully
-wired via torchgeo, Clay/DOFA were stubs.
+Wired models: croma, smarties, copernicusfm (all in the 10m group).
 """
 
 from dataclasses import dataclass
@@ -39,36 +34,23 @@ CROP_GSD_M = 20   # CaBuAr's stored per-pixel GSD (confirmed: 5490px tiles / 20m
 # implies crop_px = footprint_m / 20 (what's actually cropped out of the
 # source image) and, per-model, resize_px = footprint_m / target_gsd_m
 # (what's fed to that model, after resize_to() up/downsamples the crop).
-# 10m targets need MORE pixels than the native 20m crop had (upsample);
-# 30m targets need FEWER (downsample). See ModelSpec.resize_px_for().
+# 10m targets need MORE pixels than the native 20m crop had (upsample). See ModelSpec.resize_px_for().
 #
-#   10m group -- croma / smarties / galileo, anchored to SMARTIES' own native
+#   10m group -- croma / smarties / copernicusfm, anchored to SMARTIES' own native
 #   footprint (2240m = 224px @ 10m):
 #       smarties: 224px @ 10m (native)  -> EXACT match, stretch=1.0
 #       croma:    120px @ 10m native -- stretched 2240/1200 = 1.87x beyond its
 #                 own pretraining footprint (ALiBi's relative pos-encoding is
 #                 what makes this a reasonable ask -- paper validates
 #                 extrapolation well past this)
-#       galileo:  no fixed native image size (arbitrary H/W architecture) --
-#                 BASE_GSD=10 is what matters (a literal constant in their
-#                 source), and that's satisfied regardless of footprint
 #     crop_px = 2240/20 = 112px pulled from CaBuAr, then resize_to() upsamples
 #     that 112px crop to 224px (bilinear+antialias) for every 10m-group model.
 #     112px is also the mask/output resolution (native_crop_px_for), since
 #     out_size == crop_px throughout this codebase.
-#
-#   30m group -- prithvi, anchored to its own native footprint (6720m =
-#   224px @ 30m, exact HLS pretraining config). Only one member currently,
-#   so nothing to fuse within this group yet -- kept as a group (rather than
-#   just a standalone model) so adding a second 30m-native model later is a
-#   config change, not a refactor.
-#     crop_px = 6720/20 = 336px pulled from CaBuAr, then resize_to() downsamples
-#     (area interpolation) that 336px crop to 224px.
 # ------------------------------------------------------------
 
 GROUP_FOOTPRINT_M = {
     "10m": 2240,
-    "30m": 6720,
 }
 
 # ============================================================
@@ -104,7 +86,6 @@ N_BANDS = len(CABUAR_BANDS)
 
 RGB_S2_IDS = ["B04", "B03", "B02"]
 ALL_12_S2_IDS = [b.s2_band for b in CABUAR_BANDS]
-GALILEO_S2_BAND_IDS = ["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12"]   # matches Galileo's S2_BANDS order exactly
 
 # ------------------------------------------------------------
 # CaBuAr-wide approximate Sentinel-2 normalization stats (12 bands, CABUAR_BANDS
@@ -126,28 +107,33 @@ CABUAR_S2_STD = [
 ]
 
 # ------------------------------------------------------------
-# Galileo's OWN per-band normalization stats, for the 10 S2 bands in
-# GALILEO_S2_BAND_IDS order. Sourced directly from their
-# config/normalization.json (PRETRAINING_NORMALIZING_DICT["13"], indices
-# 2:12 -- the "13" entry covers space_time_x's 13 channels: VV, VH, then
-# the 10 S2 bands in the same order as GALILEO_S2_BAND_IDS, then NDVI).
-# Raw-reflectance-DN scale (means in the thousands) -- NOT compatible with
-# CABUAR_S2_MEAN/STD's ~0-1 scale. encoders.GalileoEncoder undoes the
-# CaBuAr-wide normalization and reapplies these before feeding Galileo.
+# Per-model PRETRAINING normalization stats (see preprocess.py for how each is applied). All on the raw
+# Sentinel-2 DN scale of the model's own pretraining data, listed for CaBuAr's 12 bands (B01..B12, no B10).
 # ------------------------------------------------------------
 
-GALILEO_S2_MEAN = [
-    1395.3408730676722, 1338.4026921784578, 1343.09883810357, 1543.8607982512297,
-    2186.2022069512263, 2525.0932853316694, 2410.3377187373408, 2750.2854646886753,
-    2234.911100061487, 1474.5311266077113,
-]
-GALILEO_S2_STD = [
-    917.7041440370853, 913.2988423581528, 1092.678723527555, 1047.2206083460424,
-    1048.0101611156767, 1143.6903026819996, 1098.979177731649, 1204.472755085893,
-    1145.9774063078878, 980.2429840007796,
-]
-GALILEO_DEFAULT_MONTH = 5   # their own fallback (src/data/dataset.py DEFAULT_MONTH) when no real acquisition
-                             # month is available -- NOT 0, which is what an earlier version of this code used
+# CROMA: SSL4EO-S12 S2-L2A (12 bands) -- SSL4EO-S12/src/benchmark/pretrain_ssl/datasets/SSL4EO/ssl4eo_dataset.py S2A_*
+CROMA_S2_MEAN = [752.40087073, 884.29673756, 1144.16202635, 1297.47289228, 1624.90992062, 2194.6423161,
+                 2422.21248945, 2517.76053101, 2581.64687018, 2645.51888987, 2368.51236873, 1805.06846033]
+CROMA_S2_STD = [1108.02887453, 1155.15170768, 1183.6292542, 1368.11351514, 1370.265037, 1355.55390699,
+                1416.51487101, 1474.78900051, 1439.3086061, 1582.28010962, 1455.52084939, 1343.48379601]
+
+# SMARTIES: its S2-L2A pretraining spec (SMARTIES/config/pretraining_sensors.yaml, SENTINEL2-L2A). Applied as
+# (clip((x-P1)/(P99-P1), 0, 1) - MEAN) / STD  (utils/data_utils.py ImageNormalizeStandardize)
+SMARTIES_S2_P1 = [1.0, 27.01892781481322, 45.058626301104624, 12.495476066364853, 5.990619300620652, 1.0,
+                  1.0793969725828485, 1.0, 1.0, 1.0, 2.3175878903313945, 4.277889404039971]
+SMARTIES_S2_P99 = [2811.4529362270814, 2604.7705241174135, 2580.36014000968, 2829.486095366986, 3138.512727440568,
+                   4338.892460929282, 5182.992628573339, 5529.262813718612, 5433.892460929279, 5170.23299517986,
+                   4418.1529202629945, 3387.4430439994744]
+SMARTIES_S2_MEAN = [0.11504939943552017, 0.1482059806585312, 0.21661478281021118, 0.198346346616745,
+                    0.2958453893661499, 0.4101085066795349, 0.3985908329486847, 0.399421751499176,
+                    0.41560056805610657, 0.43314507603645325, 0.3597027063369751, 0.29588255286216736]
+SMARTIES_S2_STD = [0.14282256364822388, 0.14939884841442108, 0.16681823134422302, 0.1924632489681244,
+                   0.19392383098602295, 0.23844216763973236, 0.23693138360977173, 0.24099795520305634,
+                   0.2424980103969574, 0.2453242689371109, 0.2402467578649521, 0.23555098474025726]
+
+# Copernicus-FM: Copernicus-Pretrain S2 (13-band S2C stats in src/main_pretrain.py, B10 entry dropped)
+COPERNICUSFM_S2_MEAN = [1612.9, 1397.6, 1322.3, 1373.1, 1561.0, 2108.4, 2390.7, 2318.7, 2581.0, 837.7, 2195.2, 1537.4]
+COPERNICUSFM_S2_STD = [791.0, 854.3, 878.7, 1144.9, 1127.5, 1164.2, 1276.0, 1249.5, 1345.9, 577.5, 1340.0, 1142.9]
 
 # ============================================================
 # PER-MODEL SPEC
@@ -189,7 +175,7 @@ class ModelSpec:
     def stretch_factor(self, footprint_m: float) -> float:
         """>1 means this run gives the model MORE ground context than it was
         pretrained on (extrapolation); <1 means less (safe for fixed sin-cos
-        pos-embed models like smarties/prithvi, riskier for learned absolute
+        pos-embed models like smarties/copernicusfm, riskier for learned absolute
         pos-embed models unless they interpolate well)."""
         return footprint_m / self.native_footprint_m()
 
@@ -217,78 +203,15 @@ MODEL_SPECS = {
               "pos-embed would need.",
         implemented=True,
     ),
-    "clay": ModelSpec(
-        name="clay",
-        bands=ALL_12_S2_IDS,        # Clay accepts all 12 bands via wavelength conditioning
-        target_gsd_m=10,            # pretrained at 10m resolution on Sentinel-2
-        patch_size=8,               # same as CROMA — produces 28x28 grid for 224px input
-        embed_dim=1024,             # encoder dim from Clay v1.5 spec
-        native_px=256,              # Clay was pretrained on 256x256 chips
-        weights="made-with-clay/Clay v1.5 (HuggingFace, download clay-v1.5.ckpt)",
-        notes="Dynamic wavelength-conditioned embedding block — accepts any band "
-              "combination via central wavelength inputs, no spectral adapter needed. "
-              "Dual MAE+DINOv2 pretraining objective. Patch size 8x8 matches CROMA "
-              "exactly so token grids align for early fusion without interpolation.",
-        implemented=True,
-    ),
-    "galileo": ModelSpec(
-        name="galileo", bands=GALILEO_S2_BAND_IDS,
-        target_gsd_m=10, patch_size=8, embed_dim=128,   # confirmed for the nano checkpoint via
-                                                          # galileo_embed_size.py -- re-check if you switch to
-                                                          # tiny/base/large, embed_dim is checkpoint-size-dependent
-        native_px=64,   # NOT a hard architectural constraint -- Galileo has no fixed pretraining image size
-                         # (arbitrary H/W, variable patch_size 4/8/16 per the paper's own compute/quality
-                         # trade-off sweep). 64px is an informational reference point only (their EuroSAT eval
-                         # benchmark chip size @ 10m = 640m), not a "native resolution" the way ViT models have
-                         # one -- stretch_factor for this model is not a meaningful risk signal.
-        weights="github.com/nasaharvest/galileo, single_file_galileo.py + a checkpoint folder "
-                "(models/nano, models/tiny, ... from the HF repo nasaharvest/galileo/tree/main/models) -- "
-                "Encoder.load_from_folder(folder, device)",
-        notes="BASE_GSD=10 is a literal named constant in their source (not inferred from pixel-count math) -- "
-              "passing target_gsd_m=10 as input_resolution_m is Galileo's actual documented default, zero "
-              "extrapolation. Genuinely temporal architecture (H,W,T,C input) -- pre/post is fed as T=2 "
-              "natively, NOT faked via batch-concat like croma/smarties. S2 bands only; Sentinel-1 and NDVI "
-              "band-groups are left masked (zero-filled, ignored by the encoder) since CaBuAr has neither -- "
-              "confirmed this degrades gracefully per their docs (<2% accuracy drop with half the modalities "
-              "missing). Output is genuinely multi-group internally ([B,H',W',T,C_G,D] per "
-              "src/single_file_galileo.py, traced through apply_linear_projection -> apply_attn -> "
-              "split_and_expand_hwtc) -- encoders.GalileoEncoder mean-pools over the active S2 channel-groups "
-              "and over T to get our usual (B,D,H',W'). NOT independently shape-verified against a live "
-              "install -- the group-count and axis-order tracing is from reading their actual source, not "
-              "guesswork, but hasn't been run. Get the real embedding_size for your checkpoint size with "
-              "galileo_embed_size.py before trusting the placeholder embed_dim above.",
-        implemented=True,
-    ),
-
-    # ---------------- 30m group ----------------
-    "prithvi": ModelSpec(
-        name="prithvi", bands=["B02", "B03", "B04", "B8A", "B11", "B12"], target_gsd_m=30, patch_size=16,
-        embed_dim=1024, native_px=224,
-        weights="local checkpoint, as in v1",
-        notes="224px @ 30m is Prithvi's exact native HLS pretraining config -- exact match at 6720m, no "
-              "extrapolation at all. Band order verify against your checkpoint: this uses B8A (narrow NIR) per "
-              "the standard HLS-equivalent 6-band set; v1 used B08 (broad NIR) -- confirm which one your "
-              "checkpoint actually trained on.",
-        implemented=True,
-    ),
-
-    # ---------------- not currently in a fusion group ----------------
-        "satmae": ModelSpec(
-        name="satmae",
-        bands=["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B11", "B12"],
-        target_gsd_m=10, patch_size=8, embed_dim=1024, native_px=96,
-        weights="sustainlab-group/SatMAE, models_vit_group_channels.py:vit_large_patch16, "
-                "zenodo.org/record/7338613 pretrain-vit-large-e199.pth",
-        notes="3 band-group patch embeds, mean-pooled after transformer blocks (see encoders.SatMAEEncoder).",
-        implemented=True,
-    ),
-    "spectralgpt": ModelSpec(
-        name="spectralgpt", bands=ALL_12_S2_IDS,
-        target_gsd_m=10, patch_size=8, embed_dim=768, native_px=96,
-        weights="danfenghong/IEEE_TPAMI_SpectralGPT, models_vit_tensor.py:vit_base_patch8, "
-                "zenodo.org/records/8412455 SpectralGPT.pth",
-        notes="3D spatial-spectral tubelet (8x8 spatial x 3-band spectral groups, 4 groups total), "
-              "mean-pooled over the spectral-group axis after transformer blocks (see encoders.SpectralGptEncoder).",
+    "copernicusfm": ModelSpec(
+        name="copernicusfm", bands=ALL_12_S2_IDS, target_gsd_m=10, patch_size=16, embed_dim=768,
+        native_px=224,
+        weights="wangyi111/Copernicus-FM (HF): CopernicusFM_ViT_base_varlang_e100.pth + "
+                "github.com/zhu-xlab/Copernicus-FM cloned to <repo_root>/CopernicusFM_repo",
+        notes="DOFA-style dynamic spectral patch embed (per-band central wavelength + bandwidth in nm), so all 12 "
+              "CaBuAr S2 bands go in directly. Pretrained on Copernicus-Pretrain / SSL4EO-S12 S2 at 224px @ 10m "
+              "(native footprint 2240m == this group's). Fixed sin-cos pos-embed, resized to the run's grid. "
+              "ViT-B/16 -> 14x14 grid at 224px.",
         implemented=True,
     ),
 }
@@ -296,8 +219,7 @@ MODEL_SPECS = {
 MODEL_NAMES = list(MODEL_SPECS)
 
 FUSION_GROUPS = {
-    "10m": ["croma", "smarties", "galileo", "clay"],
-    "30m": ["prithvi"],
+    "10m": ["croma", "smarties", "copernicusfm"],
 }
 
 HEAD_TYPES = ("linear_probe", "upernet")
@@ -327,7 +249,7 @@ def footprint_m_for(model_names: list) -> float:
     """The physical ground footprint (meters) this run's models should be
     cropped/resampled from. If every model shares a FUSION_GROUPS entry,
     uses that group's footprint. If it's a single model NOT in any group
-    (currently just satmae), falls back to that model's own native
+    (currently none), falls back to that model's own native
     footprint so it can still be run standalone."""
     groups = {group_of(m) for m in model_names}
     if len(groups) == 1 and None not in groups:

@@ -1,5 +1,5 @@
 """
-fusion_v2/encoders.py
+encoders.py
 ========================
 One wrapper class per model, all sharing the same contract:
 
@@ -15,12 +15,9 @@ model itself, so encoders take resize_px as a constructor arg instead of
 reading a fixed value off ModelSpec.
 
 Convention for combining pre/post:
-  - Plain (non-temporal) 2D ViTs (CROMA, SatMAE, SMARTIES): batch pre+post
+  - All three encoders (CROMA, SMARTIES, Copernicus-FM) are plain (non-temporal) 2D ViTs: batch pre+post
     together into one encoder call (2B images), split back apart,
     channel-concat -> embed_dim doubles.
-  - Temporal-aware models (Prithvi, Galileo): stack pre/post as a genuine
-    2-frame temporal axis, mean-pool over time after the encoder ->
-    embed_dim stays single (not doubled).
 """
 
 import os
@@ -37,6 +34,7 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 from configs import MODEL_SPECS
+from preprocess import S2Normalizer
 
 
 class _FrozenAwareModule(nn.Module):
@@ -59,7 +57,7 @@ class _FrozenAwareModule(nn.Module):
 
 
 # ============================================================
-# CROMA -- fully wired
+# CROMA
 # ============================================================
 
 class CromaEncoder(_FrozenAwareModule):
@@ -74,13 +72,14 @@ class CromaEncoder(_FrozenAwareModule):
             pretrained_path=ckpt_path, size="large", modality="optical", image_resolution=resize_px
         )
         self.embed_dim = self.model.encoder_dim * 2   # pre+post concat
+        self.prep = S2Normalizer("croma")
         self.patch_size = spec.patch_size
         self.grid_size = resize_px // spec.patch_size
         self.frozen = False
 
     def forward(self, pre: torch.Tensor, post: torch.Tensor) -> torch.Tensor:
         stacked = torch.cat([pre, post], dim=0)
-        tokens = self.model(optical_images=stacked)["optical_encodings"]
+        tokens = self.model(optical_images=self.prep(stacked))["optical_encodings"]
         B2, N, C = tokens.shape
         g = self.grid_size
         assert N == g * g, f"CROMA: expected {g*g} tokens, got {N}"
@@ -90,37 +89,7 @@ class CromaEncoder(_FrozenAwareModule):
 
 
 # ============================================================
-# Prithvi -- fully wired
-# ============================================================
-
-class PrithviEncoder(_FrozenAwareModule):
-    spec_name = "prithvi"
-
-    def __init__(self, resize_px: int, in_chans: int = 6):
-        super().__init__()
-        spec = MODEL_SPECS["prithvi"]
-        from hf_prithvi import PrithviViT
-        self.model = PrithviViT(
-            num_frames=2, img_size=resize_px, patch_size=spec.patch_size, in_chans=in_chans, coords_encoding=None,
-        )
-        self.embed_dim = self.model.embed_dim
-        self.patch_size = spec.patch_size
-        self.grid_size = resize_px // spec.patch_size
-        self.frozen = False
-
-    def forward(self, pre: torch.Tensor, post: torch.Tensor) -> torch.Tensor:
-        x = torch.stack([pre, post], dim=2)
-        tokens = self.model.forward_features(x)[-1]
-        tokens = tokens[:, 1:, :]
-        B, N, C = tokens.shape
-        T, g = 2, self.grid_size
-        assert N == T * g * g, f"Prithvi: expected {T*g*g} tokens, got {N}"
-        x = tokens.reshape(B, T, g, g, C).mean(dim=1)
-        return x.permute(0, 3, 1, 2)
-
-
-# ============================================================
-# SMARTIES -- fully wired
+# SMARTIES
 #
 # gsumbul/SMARTIES-v1-ViT-L's own forward() hardcodes its position embedding
 # to whatever grid it was constructed with -- but that pos_embed is a FIXED
@@ -261,11 +230,12 @@ class SmartiesEncoder(_FrozenAwareModule):
                 f"against this checkpoint's spectrum_specs.yaml)."
             )
         self.bands = [_S2ID_TO_SMARTIES_NAME[b] for b in spec.bands]
+        self.prep = S2Normalizer("smarties")
         self.frozen = False
 
     def forward(self, pre: torch.Tensor, post: torch.Tensor) -> torch.Tensor:
         stacked = torch.cat([pre, post], dim=0)
-        tokens = smarties_encode(self.model, stacked, self.bands, self.grid_size)
+        tokens = smarties_encode(self.model, self.prep(stacked), self.bands, self.grid_size)
         tokens = tokens[:, 1:, :]
         B2, N, C = tokens.shape
         g = self.grid_size
@@ -274,434 +244,106 @@ class SmartiesEncoder(_FrozenAwareModule):
         B = pre.shape[0]
         return torch.cat([grid[:B], grid[B:]], dim=1)
 
+
 # ============================================================
-# Clay v1.5 -- fully wired
+# Copernicus-FM (ViT-B/16)
 #
-# Dynamic wavelength-conditioned embedding block -- passes central
-# wavelength per band instead of fixed channel counts, so all 12
-# CaBuAr S2 bands work directly, no spectral adapter needed.
-# patch_size=8, embed_dim=1024 -- matches CROMA exactly, so token
-# grids align for early fusion with no interpolation.
+# Wavelength/bandwidth-conditioned patch embed (DOFA-style hypernetwork), so
+# all 12 CaBuAr S2 bands feed in directly. Code lives in the cloned repo
+# <repo_root>/CopernicusFM_repo/Copernicus-FM/src (github.com/zhu-xlab/Copernicus-FM);
+# weights from HF wangyi111/Copernicus-FM.
 #
-# IMPORTANT: Clay's encoder is an MAE encoder -- by default it masks
-# 75% of patches and returns only the unmasked subset, which can't be
-# reshaped into a full spatial grid. mask_ratio/shuffle are NOT forward()
-# args -- they're set at LOAD time via load_from_checkpoint(), per
-# Clay's own tutorials (see clay-foundation.github.io/model/tutorials/
-# embeddings.html). mask_ratio=0.0 + shuffle=False gives back every
-# patch, in raster order, so no unmasked_indices bookkeeping is needed.
+# The repo's model_vit.py uses relative imports (.dynamic_hypernetwork, ...) AND
+# absolute ones (util.pos_embed, aurora.fourier, flexivit.*), and its folder is
+# named `src` -- which clashes with this repo's own src/ -- so it's loaded under
+# the package name `cfm_pkg` with its folder also appended to sys.path.
 #
-# Pre/post handled the same batch-concat way as CROMA/SMARTIES.
+# return_intermediate=True gives the last block's patch tokens as a (B, C, h, w)
+# grid (no cls token, no pooling). Pre/post batched like CROMA/SMARTIES.
 # ============================================================
 
-_CLAY_S2_WAVELENGTHS = [
-    0.443, 0.490, 0.560, 0.665, 0.705, 0.740, 0.783, 0.842, 0.865, 0.945, 1.610, 2.190,
-]   # MICROMETRES, CABUAR_BANDS order (B01..B12) -- see configs.CABUAR_BANDS.
-    # Clay's DOFA-style DynamicEmbedding was pretrained with wavelengths on the
-    # micrometre scale (cf. Clay's own configs/metadata.yaml: blue=0.493, ...,
-    # swir22=2.19), NOT nanometres -- feeding nm silently corrupts the per-band
-    # conditioning.
+# Sentinel-2 central wavelength / bandwidth (nm), CABUAR_BANDS order (B01..B12, no B10)
+_S2_WAVELENGTH_NM = [443, 490, 560, 665, 705, 740, 783, 842, 865, 945, 1610, 2190]
+_S2_BANDWIDTH_NM = [20, 65, 35, 30, 15, 15, 20, 115, 20, 20, 90, 180]
 
 
-class ClayEncoder(_FrozenAwareModule):
-    spec_name = "clay"
+class CopernicusFMEncoder(_FrozenAwareModule):
+    spec_name = "copernicusfm"
 
-    def __init__(self, resize_px: int, ckpt_path: str = "clay-v1.5.ckpt",
-                 metadata_path: str = "metadata.yaml"):
+    def __init__(self, resize_px: int,
+                 ckpt_path: str = os.path.join(_ROOT, "CopernicusFM_ViT_base_varlang_e100.pth"),
+                 kernel_size: int = 16):
         super().__init__()
-        spec = MODEL_SPECS["clay"]
-        from claymodel.module import ClayMAEModule
-        clay_module = ClayMAEModule.load_from_checkpoint(
-            checkpoint_path=ckpt_path,
-            model_size="large",
-            metadata_path=metadata_path,
-            dolls=[16, 32, 64, 128, 256, 768, 1024],
-            doll_weights=[1, 1, 1, 1, 1, 1, 1],
-            mask_ratio=0.0,     # disable masking -- segmentation needs every patch
-            shuffle=False,      # keep raster order -- no re-sorting via unmasked_indices
-            map_location="cpu",
-        )
-        clay_module.eval()
-        self.model = clay_module.model.encoder   # just the encoder, not the decoder
+        import types
+        spec = MODEL_SPECS["copernicusfm"]
+        assert len(spec.bands) == len(_S2_WAVELENGTH_NM), "band list / wavelength table mismatch"
+        src_dir = os.path.join(_ROOT, "CopernicusFM_repo", "Copernicus-FM", "src")
+        if not os.path.isdir(src_dir):
+            raise FileNotFoundError(
+                f"{src_dir} not found -- run: git clone https://github.com/zhu-xlab/Copernicus-FM.git "
+                f"{os.path.join(_ROOT, 'CopernicusFM_repo')}")
+        if src_dir not in sys.path:
+            sys.path.append(src_dir)
+        if "cfm_pkg" not in sys.modules:
+            pkg = types.ModuleType("cfm_pkg")
+            pkg.__path__ = [src_dir]
+            sys.modules["cfm_pkg"] = pkg
+        from cfm_pkg.model_vit import vit_base_patch16
 
-        assert resize_px % spec.patch_size == 0, \
-            f"resize_px={resize_px} not divisible by Clay patch_size={spec.patch_size}"
-        self.patch_size = spec.patch_size
-        self.grid_size = resize_px // spec.patch_size
-        self.embed_dim = spec.embed_dim * 2   # pre+post concat, same convention as CROMA/SMARTIES
-        self.target_gsd_m = spec.target_gsd_m   # fed to Clay's gsd-aware position encoding
-
-        self.register_buffer(
-            "_wavelengths",
-            torch.tensor(_CLAY_S2_WAVELENGTHS, dtype=torch.float32)
-        )
-
-        self.register_buffer(
-            "_gsd",
-            torch.tensor(10.0, dtype=torch.float32)
-        )
-        self.frozen = False
-
-    def forward(self, pre: torch.Tensor, post: torch.Tensor) -> torch.Tensor:
-        stacked = torch.cat([pre, post], dim=0)   # (2B, 12, H, W)
-        B2 = stacked.shape[0]
-        device = stacked.device
-
-        # Clay v1.5's Encoder.forward takes ONE `datacube` dict -- older Clay
-        # took positional (pixels, time, waves), which is what the
-        # "forward() takes 2 positional arguments but 4 were given" error was.
-        #   pixels [B,C,H,W]
-        #   time   [B,4]  pre-encoded [week_sin, week_cos, hour_sin, hour_cos] -- zeros = no metadata
-        #   latlon [B,4]  pre-encoded [lat_sin, lat_cos, lon_sin, lon_cos]     -- zeros = no metadata
-        #                 (add_encodings hstacks time+latlon and expects width 8:
-        #                  pos_encoding is dim-8, so time_latlon must fill the last 8)
-        #   gsd    scalar TENSOR               -- utils.posemb_sincos_2d_with_gsd calls gsd.to(...)
-        #   waves  [N]    per-band wavelengths -- NOT batched, micrometre scale
-        datacube = {
-            "pixels": stacked,
-            "time": torch.zeros(B2, 2, device=device),
-            "latlon": torch.zeros(B2, 2, device=device),
-            "gsd": torch.tensor(float(self.target_gsd_m), device=device),
-            "waves": self._wavelengths.to(device),
-        }
-  
-        tokens, unmsk_idx, msk_idx, msk_matrix = self.model(datacube)
-        # with mask_ratio=0.0 + shuffle=False, tokens should be the FULL grid
-        # (+ CLS) in raster order -- unmsk_idx/msk_idx are ignorable here since
-        # nothing was actually masked.
-
-        B2_, N, C = tokens.shape
-        g = self.grid_size
-        if N == g * g + 1:
-            tokens = tokens[:, 1:, :]   # strip CLS token if the encoder still prepends one
-            B2_, N, C = tokens.shape
-        assert N == g * g, \
-            f"Clay: expected {g*g} tokens, got {N} -- check mask_ratio/shuffle took effect " \
-            f"and resize_px={g*self.patch_size} is what was actually passed in"
-
-        grid = tokens.reshape(B2_, g, g, C).permute(0, 3, 1, 2)
-        B = pre.shape[0]
-        return torch.cat([grid[:B], grid[B:]], dim=1)   # (B, 2048, g, g)
-        
-# ============================================================
-# STUBS -- interface finalized, weight-loading left as TODO
-# ============================================================
-
-class _UnimplementedEncoder(_FrozenAwareModule):
-    spec_name = "override_me"
-
-    def __init__(self, resize_px: int):
-        super().__init__()
-        spec = MODEL_SPECS[self.spec_name]
-        self.embed_dim = spec.embed_dim * 2   # assume non-temporal (pre+post concat); adjust if temporal
-        self.patch_size = spec.patch_size
-        assert resize_px % self.patch_size == 0
-        self.grid_size = resize_px // self.patch_size
-        self.resize_px = resize_px
-        self.frozen = False
-        self.model = nn.Identity()
-
-    def forward(self, pre: torch.Tensor, post: torch.Tensor) -> torch.Tensor:
-        spec = MODEL_SPECS[self.spec_name]
-        raise NotImplementedError(
-            f"'{self.spec_name}' encoder not wired yet. See configs.MODEL_SPECS['{self.spec_name}'].notes "
-            f"for what's needed ({spec.weights}). Expected forward contract: pre/post are "
-            f"(B, {len(spec.bands)}, {self.resize_px}, {self.resize_px}) -> return "
-            f"(B, C, {self.grid_size}, {self.grid_size})."
-        )
-
-
-class SatMAEEncoder(_FrozenAwareModule):
-    spec_name = "satmae"
-
-    def __init__(self, resize_px: int, ckpt_path: str = "pretrain-vit-large-e199.pth",
-                 channel_groups=((0, 1, 2, 6), (3, 4, 5, 7), (8, 9))):
-        super().__init__()
-        spec = MODEL_SPECS["satmae"]
-        assert len(spec.bands) == 10, f"SatMAE group_c checkpoint expects 10 bands, got {len(spec.bands)}"
-        import sys as _sys
-        _satmae_root = os.path.join(_ROOT, "SatMAE")
-        if _satmae_root not in _sys.path:
-            _sys.path.insert(0, _satmae_root)
-        from models_vit_group_channels import vit_large_patch16 as satmae_vit_large
-
-        assert resize_px % spec.patch_size == 0
-        self.patch_size = spec.patch_size
-        self.grid_size = resize_px // spec.patch_size
-        self.num_groups = len(channel_groups)
-
-        self.model = satmae_vit_large(img_size=resize_px, patch_size=spec.patch_size,
-                                       in_chans=len(spec.bands), num_classes=0,
-                                       channel_groups=channel_groups)
+        assert resize_px % kernel_size == 0, f"resize_px={resize_px} not divisible by kernel_size={kernel_size}"
+        self.kernel_size = kernel_size
+        self.patch_size = kernel_size
+        self.grid_size = resize_px // kernel_size
+        self.model = vit_base_patch16(img_size=resize_px, return_intermediate=True, intermediate_indices=[11])
         ckpt = torch.load(ckpt_path, map_location="cpu")
-        missing, unexpected = self.model.load_state_dict(ckpt.get("model", ckpt), strict=False)
-        print(f"SatMAE load_state_dict: missing={missing}, unexpected={unexpected}")
+        state = ckpt.get("model", ckpt)
+        # pos_embed is a fixed sin-cos table at the pretraining grid; the model resizes it at runtime,
+        # so keep whatever the checkpoint holds and don't fail on a grid-size difference.
+        sd = self.model.state_dict()
+        for k in [k for k, v in state.items() if k in sd and v.shape != sd[k].shape]:
+            print(f"CopernicusFM: dropping ckpt '{k}' {tuple(state[k].shape)} (model expects {tuple(sd[k].shape)})")
+            del state[k]
+        msg = self.model.load_state_dict(state, strict=False)
+        print(f"CopernicusFM load_state_dict: missing={msg.missing_keys}, "
+              f"unexpected={len(msg.unexpected_keys)} keys")
 
-        self.embed_dim = self.model.embed_dim * 2
+        self.prep = S2Normalizer("copernicusfm")
+        self.register_buffer("_wvs", torch.tensor(_S2_WAVELENGTH_NM, dtype=torch.float32), persistent=False)
+        self.embed_dim = self.model.blocks[0].norm1.normalized_shape[0] * 2   # pre+post concat
         self.frozen = False
-
-    def _forward_no_pool(self, x):
-        m = self.model
-        b = x.shape[0]
-        x_c = [m.patch_embed[i](x[:, g, :, :]) for i, g in enumerate(m.channel_groups)]
-        x = torch.stack(x_c, dim=1)
-        _, G, L, D = x.shape
-        ch_e = m.channel_embed.unsqueeze(2).expand(-1, -1, L, -1)
-        pos_e = m.pos_embed[:, 1:, :].unsqueeze(1).expand(-1, G, -1, -1)
-        x = x + torch.cat((pos_e, ch_e), dim=-1)
-        x = x.view(b, -1, D)
-        cls_pc = torch.cat((m.pos_embed[:, :1, :], m.channel_cls_embed), dim=-1)
-        x = torch.cat((cls_pc + m.cls_token.expand(b, -1, -1), x), dim=1)
-        x = m.pos_drop(x)
-        for blk in m.blocks:
-            x = blk(x)
-        return m.norm(x)[:, 1:, :]
 
     def _encode_one(self, imgs):
-        tokens = self._forward_no_pool(imgs)
-        B, GL, D = tokens.shape
+        meta = torch.full((imgs.shape[0], 4), float("nan"), device=imgs.device)   # lon/lat/time/area unknown
+        _, feats = self.model(self.prep(imgs), meta, _S2_WAVELENGTH_NM, _S2_BANDWIDTH_NM, None, "spectral", self.kernel_size)
+        grid = feats[-1]
+        # Block outputs are pre-final-norm (an earlier, mis-scaled input made them huge, std ~2.5e4) -- the ckpt ships
+        # no trained final norm (fc_norm.* missing), so apply a plain per-token LayerNorm over channels.
+        grid = torch.nn.functional.layer_norm(grid.permute(0, 2, 3, 1), (grid.shape[1],)).permute(0, 3, 1, 2)
         g = self.grid_size
-        assert GL == self.num_groups * g * g
-        tokens = tokens.reshape(B, self.num_groups, g, g, D).mean(dim=1)
-        return tokens.permute(0, 3, 1, 2)
+        assert grid.shape[-2:] == (g, g), f"CopernicusFM: expected {g}x{g} grid, got {tuple(grid.shape[-2:])}"
+        return grid
 
     def forward(self, pre, post):
-        stacked = torch.cat([pre, post], dim=0)
-        grid = self._encode_one(stacked)
+        grid = self._encode_one(torch.cat([pre, post], dim=0))
         B = pre.shape[0]
         return torch.cat([grid[:B], grid[B:]], dim=1)
-
-
-class SpectralGptEncoder(_FrozenAwareModule):
-    spec_name = "spectralgpt"
-
-    def __init__(self, resize_px: int, ckpt_path: str = "SpectralGPT.pth"):
-        super().__init__()
-        spec = MODEL_SPECS["spectralgpt"]
-        import sys as _sys
-        _sgpt_root = os.path.join(_ROOT, "IEEE_TPAMI_SpectralGPT")
-        if _sgpt_root not in _sys.path:
-            _sys.path.insert(0, _sgpt_root)
-        from models_vit_tensor import VisionTransformer as SpectralGPTViT
-
-        assert resize_px % spec.patch_size == 0
-        self.patch_size = spec.patch_size
-        self.grid_size = resize_px // spec.patch_size
-        self.num_spectral_groups = len(spec.bands) // 3
-        assert len(spec.bands) % 3 == 0
-
-        self.model = SpectralGPTViT(
-            img_size=resize_px, in_chans=1, patch_size=spec.patch_size,
-            embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
-            num_frames=len(spec.bands), t_patch_size=3,
-            norm_layer=partial(nn.LayerNorm, eps=1e-6), num_classes=0,
-        )
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-        missing, unexpected = self.model.load_state_dict(ckpt.get("model", ckpt), strict=False)
-        print(f"SpectralGPT load_state_dict: missing={missing}, unexpected={unexpected}")
-
-        self.embed_dim = getattr(self.model, "embed_dim", 768) * 2
-        self.frozen = False
-
-    def _forward_no_head(self, x):
-        m = self.model
-        x = torch.unsqueeze(x, dim=1)
-        x = m.patch_embed(x)
-        N, T, L, C = x.shape
-        x = x.view([N, T * L, C]) + m.pos_embed[:, :, :]
-        rt = (len(m.blocks) > 0 and hasattr(m.blocks[0].attn, "requires_t_shape")
-              and m.blocks[0].attn.requires_t_shape)
-        if rt:
-            x = x.view([N, T, L, C])
-        for blk in m.blocks:
-            x = blk(x)
-        if rt:
-            x = x.view([N, T * L, C])
-        return m.norm(x)
-
-    def _encode_one(self, imgs):
-        tokens = self._forward_no_head(imgs)
-        B, TL, C = tokens.shape
-        g, T = self.grid_size, self.num_spectral_groups
-        assert TL == T * g * g
-        tokens = tokens.reshape(B, T, g, g, C).mean(dim=1)
-        return tokens.permute(0, 3, 1, 2)
-
-    def forward(self, pre, post):
-        stacked = torch.cat([pre, post], dim=0)
-        grid = self._encode_one(stacked)
-        B = pre.shape[0]
-        return torch.cat([grid[:B], grid[B:]], dim=1)
-
-# ============================================================
-# Galileo -- best-effort real implementation, grounded directly in
-# single_file_galileo.py's source (not just their docs/README, which
-# describe a simplified [B,L,D] output that doesn't match what
-# Encoder.forward() actually returns). NOT independently shape-verified
-# against a live install -- see MODEL_SPECS['galileo'].notes.
-#
-# Genuinely temporal (H,W,T,C input), so pre/post become T=2 natively --
-# no batch-concat trick needed the way croma/smarties use.
-# Only the S2 band-groups are populated; Sentinel-1 and NDVI stay masked
-# (zero-filled, unseen by the encoder) since CaBuAr has neither.
-# ============================================================
-
-# SPACE_TIME_BANDS / SPACE_TIME_BANDS_GROUPS_IDX layout, copied from
-# single_file_galileo.py (S1_BANDS + S2_BANDS + ["NDVI"], 7 channel groups
-# in this exact order) -- needed to build the masked input tensor without
-# depending on their (non-batched) construct_galileo_input() helper.
-_GALILEO_SPACE_TIME_BANDS = ["VV", "VH"] + [
-    "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B8A", "B11", "B12"
-] + ["NDVI"]
-_GALILEO_S2_GROUP_SLICE = slice(1, 6)   # S2_RGB, S2_Red_Edge, S2_NIR_10m, S2_NIR_20m, S2_SWIR (5 of 7 groups)
-_GALILEO_S2_BAND_START = 2              # where our 10 S2 bands land inside the 13-band space-time vector
-
-# ------------------------------------------------------------
-# Galileo's OWN per-band normalization stats for its 10 S2 bands, sourced
-# directly from their config/normalization.json (PRETRAINING_NORMALIZING_DICT
-# in src/data/utils.py -- the "13" entry, S1(2)+S2(10)+NDVI(1), indices 2-11
-# for our S2 bands, confirmed to be in the exact same order as
-# configs.GALILEO_S2_BAND_IDS). Raw-DN-scale, NOT the ~0-1 reflectance scale
-# loader.py's shared S2_MEAN/S2_STD produces -- see GalileoEncoder._renormalize.
-# ------------------------------------------------------------
-
-
-class GalileoEncoder(_FrozenAwareModule):
-    spec_name = "galileo"
-
-    def __init__(self, resize_px: int, checkpoint_folder: str = None):
-        super().__init__()
-        import sys as _sys
-        from pathlib import Path
-        _galileo_root = os.path.join(_ROOT, "galileo")   # expects the cloned repo at <repo_root>/galileo,
-                                                            # i.e. a SIBLING of this src/ dir, not nested in it --
-                                                            # _ROOT is derived from this file's own location so
-                                                            # it's correct regardless of what this folder is named
-        if _galileo_root not in _sys.path:
-            _sys.path.insert(0, _galileo_root)
-        from single_file_galileo import Encoder as GalileoRawEncoder
-
-        if checkpoint_folder is None:
-            checkpoint_folder = os.path.join(_galileo_root, "data", "models", "base")   # absolute, not
-                                                                                          # cwd-dependent
-        spec = MODEL_SPECS["galileo"]
-        self.model = GalileoRawEncoder.load_from_folder(Path(checkpoint_folder), device=torch.device("cpu"))
-        self.embed_dim = self.model.embedding_size   # read the real value -- checkpoint-size-dependent
-        self.patch_size = spec.patch_size
-        assert resize_px % self.patch_size == 0
-        self.grid_size = resize_px // self.patch_size
-        self.target_gsd_m = spec.target_gsd_m
-        self.frozen = False
-
-        # undo loader.py's generic CaBuAr-wide normalization (~0-1 reflectance scale), then reapply
-        # Galileo's own raw-DN-scale stats (both live in configs.py as plain lists -- built into
-        # tensors here, not there, per configs.py's own "no tensor work" convention).
-        # loader_mean/std sliced+reordered from configs.CABUAR_S2_MEAN/STD (12-band CaBuAr order) to
-        # this model's 10 S2 bands via band_utils.band_indices so the two normalization steps line up
-        # band-for-band.
-        from configs import CABUAR_S2_MEAN, CABUAR_S2_STD, GALILEO_S2_MEAN, GALILEO_S2_STD, GALILEO_DEFAULT_MONTH
-        from band_utils import band_indices
-        idx = band_indices(spec.bands)   # spec.bands is GALILEO_S2_BAND_IDS -- indices into the 12-band CaBuAr order
-        loader_mean = torch.tensor(CABUAR_S2_MEAN)[idx].view(1, 10, 1, 1)
-        loader_std = torch.tensor(CABUAR_S2_STD)[idx].view(1, 10, 1, 1)
-        self.register_buffer("_loader_mean", loader_mean, persistent=False)
-        self.register_buffer("_loader_std", loader_std, persistent=False)
-        self.register_buffer("_galileo_mean", torch.tensor(GALILEO_S2_MEAN).view(1, 10, 1, 1), persistent=False)
-        self.register_buffer("_galileo_std", torch.tensor(GALILEO_S2_STD).view(1, 10, 1, 1), persistent=False)
-        self.default_month = GALILEO_DEFAULT_MONTH
-
-    def _renormalize(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, 10, H, W), already normalized by loader.py's shared CaBuAr-wide
-        stats (which operate on CaBuAr's ~0-1 FRACTIONAL REFLECTANCE scale --
-        that's why CABUAR_S2_MEAN's values are ~0.06-0.3, not thousands).
-        Undoes that back to raw reflectance, then converts to the RAW DN scale
-        Galileo's own stats assume (standard Sentinel-2 L2A convention: DN =
-        reflectance * 10000 -- confirmed by GALILEO_S2_MEAN's blue-band value,
-        ~1395, which is 0.1395 as a reflectance fraction, an entirely
-        ordinary value) before applying Galileo's per-band normalization.
-        Skipping the *10000 step would leave the recovered value off by ~4
-        orders of magnitude from what Galileo's mean/std were computed for --
-        the undo/redo algebra alone isn't enough, the unit conversion matters
-        just as much."""
-        raw_reflectance = x * self._loader_std + self._loader_mean
-        raw_dn = raw_reflectance * 10000.0
-        return (raw_dn - self._galileo_mean) / self._galileo_std
-
-    def _build_masked_input(self, pre: torch.Tensor, post: torch.Tensor):
-        """pre/post: (B, 10, H, W), our S2 band order (matches Galileo's own
-        S2_BANDS order exactly), still normalized with loader.py's shared
-        stats at this point. Returns the 9 tensors Encoder.forward() needs,
-        with only the S2 channel-groups unmasked."""
-        pre, post = self._renormalize(pre), self._renormalize(post)
-
-        B, C, H, W = pre.shape
-        device, dtype = pre.device, pre.dtype
-        T = 2
-
-        s_t_x = torch.zeros(B, H, W, T, len(_GALILEO_SPACE_TIME_BANDS), device=device, dtype=dtype)
-        s_t_x[..., 0, _GALILEO_S2_BAND_START:_GALILEO_S2_BAND_START + C] = pre.permute(0, 2, 3, 1)
-        s_t_x[..., 1, _GALILEO_S2_BAND_START:_GALILEO_S2_BAND_START + C] = post.permute(0, 2, 3, 1)
-
-        s_t_m = torch.ones(B, H, W, T, 7, device=device, dtype=dtype)   # 7 space-time channel groups; 1 = masked
-        s_t_m[..., _GALILEO_S2_GROUP_SLICE] = 0                       # unmask (make visible) the 5 S2 groups
-
-        sp_x = torch.zeros(B, H, W, 0, device=device, dtype=dtype)     # no space-only bands (SRTM/DW/WC) available
-        sp_m = torch.ones(B, H, W, 3, device=device, dtype=dtype)      # 3 space-only groups, all masked
-        t_x = torch.zeros(B, T, 0, device=device, dtype=dtype)         # no time-only bands (ERA5/TC/VIIRS) available
-        t_m = torch.ones(B, T, 3, device=device, dtype=dtype)          # 3 time-only groups, all masked
-        st_x = torch.zeros(B, 0, device=device, dtype=dtype)           # no static bands (landscan/latlon/DW/WC) available
-        st_m = torch.ones(B, 4, device=device, dtype=dtype)            # 4 static groups (LS, location, DW_static, WC_static), all masked
-        months = torch.full((B, T), self.default_month, dtype=torch.long, device=device)   # their own
-                                                                                              # DEFAULT_MONTH
-                                                                                              # fallback (5),
-                                                                                              # not 0
-
-        return s_t_x, sp_x, t_x, st_x, s_t_m, sp_m, t_m, st_m, months
-
-    def forward(self, pre: torch.Tensor, post: torch.Tensor) -> torch.Tensor:
-        s_t_x, sp_x, t_x, st_x, s_t_m, sp_m, t_m, st_m, months = self._build_masked_input(pre, post)
-
-        s_t_out, *_ = self.model(
-            s_t_x, sp_x, t_x, st_x, s_t_m, sp_m, t_m, st_m, months,
-            patch_size=self.patch_size, input_resolution_m=self.target_gsd_m,
-        )
-        # s_t_out: (B, H', W', T, 7, D) -- mean-pool over the 5 active S2
-        # groups, then over T (genuinely temporal, same convention as Prithvi)
-        s2_groups = s_t_out[..., _GALILEO_S2_GROUP_SLICE, :]   # (B, H', W', T, 5, D)
-        pooled = s2_groups.mean(dim=(3, 4))                     # (B, H', W', D) -- mean over T and groups together
-        return pooled.permute(0, 3, 1, 2)                       # (B, D, H', W')
 
 
 ENCODER_CLASSES = {
     "croma": CromaEncoder,
-    "prithvi": PrithviEncoder,
     "smarties": SmartiesEncoder,
-    "galileo": GalileoEncoder,
-    "satmae": SatMAEEncoder,
-    "spectralgpt": SpectralGptEncoder,
-    "clay": ClayEncoder,
+    "copernicusfm": CopernicusFMEncoder,
 }
 
 
 def build_encoder(model_name: str, resize_px: int, device: str,
-                   croma_ckpt: str = "/mnt/beegfs/spillal2/caburn/Emb_For_Fire/CROMA_large.pt",
-                   galileo_checkpoint_folder: str = None,
-                   clay_ckpt: str = "clay-v1.5.ckpt",
-                   clay_metadata: str = "metadata.yaml",
-                   satmae_ckpt: str = "pretrain-vit-large-e199.pth",
-                   spectralgpt_ckpt: str = "SpectralGPT.pth") -> nn.Module:
+                   croma_ckpt: str = os.path.join(_ROOT, "CROMA_large.pt"),
+                   copernicusfm_ckpt: str = os.path.join(_ROOT, "CopernicusFM_ViT_base_varlang_e100.pth")) -> nn.Module:
     cls = ENCODER_CLASSES[model_name]
     if model_name == "croma":
         enc = cls(resize_px, ckpt_path=croma_ckpt)
-    elif model_name == "galileo":
-        kwargs = {"checkpoint_folder": galileo_checkpoint_folder} if galileo_checkpoint_folder else {}
-        enc = cls(resize_px, **kwargs)
-    elif model_name == "clay":
-        enc = cls(resize_px, ckpt_path=clay_ckpt, metadata_path=clay_metadata)
-    elif model_name == "satmae":
-        enc = cls(resize_px, ckpt_path=satmae_ckpt)
-    elif model_name == "spectralgpt":
-        enc = cls(resize_px, ckpt_path=spectralgpt_ckpt)
+    elif model_name == "copernicusfm":
+        enc = cls(resize_px, ckpt_path=copernicusfm_ckpt)
     else:
         enc = cls(resize_px)
     return enc.to(device)
